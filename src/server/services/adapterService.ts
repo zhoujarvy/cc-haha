@@ -85,7 +85,7 @@ class AdapterService {
       if (config.feishu.verificationToken) config.feishu.verificationToken = maskSecret(config.feishu.verificationToken)
     }
     if (config.pairing?.code) {
-      config.pairing.code = maskSecret(config.pairing.code)
+      config.pairing.code = '******'
     }
     return config
   }

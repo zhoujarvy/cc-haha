@@ -72,6 +72,8 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # ── 系统依赖 (Linux) ─────────────────────────────────────
+      # libfuse2 是 AppImage 运行时依赖：linuxdeploy 工具链本身是 AppImage 格式，
+      # 运行时需要 libfuse2，Ubuntu 22.04 默认未安装。
       - name: Install Linux dependencies
         if: contains(matrix.platform, 'ubuntu')
         run: |
@@ -81,7 +83,8 @@ jobs:
             libxdo-dev libssl-dev \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev patchelf
+            librsvg2-dev patchelf \
+            libfuse2
 
       # ── Bun ──────────────────────────────────────────────────
       - name: Setup Bun

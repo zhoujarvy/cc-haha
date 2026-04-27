@@ -11,6 +11,9 @@ import * as os from 'node:os'
 import { ApiError } from '../middleware/errorHandler.js'
 import { sanitizePath as sanitizePortablePath } from '../../utils/sessionStoragePortable.js'
 import type { FileHistorySnapshot } from '../../utils/fileHistory.js'
+import { calculateUSDCost, MODEL_COSTS } from '../../utils/modelCost.js'
+import { getContextWindowForModel, getModelMaxOutputTokens } from '../../utils/context.js'
+import { getCanonicalName } from '../../utils/model/model.js'
 
 // ============================================================================
 // Types
@@ -55,6 +58,41 @@ export type MessageEntry = {
   isSidechain?: boolean
 }
 
+export type TranscriptUsageSnapshot = {
+  source: 'transcript'
+  totalCostUSD: number
+  costDisplay: string
+  hasUnknownModelCost: boolean
+  totalAPIDuration: number
+  totalDuration: number
+  totalLinesAdded: number
+  totalLinesRemoved: number
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalCacheReadInputTokens: number
+  totalCacheCreationInputTokens: number
+  totalWebSearchRequests: number
+  models: Array<{
+    model: string
+    displayName: string
+    inputTokens: number
+    outputTokens: number
+    cacheReadInputTokens: number
+    cacheCreationInputTokens: number
+    webSearchRequests: number
+    costUSD: number
+    costDisplay: string
+    contextWindow: number
+    maxOutputTokens: number
+  }>
+}
+
+export type TranscriptMetadataSnapshot = {
+  model?: string
+  cwd?: string
+  version?: string
+}
+
 /** Raw entry parsed from a single JSONL line */
 type RawEntry = {
   type?: string
@@ -71,8 +109,19 @@ type RawEntry = {
     model?: string
     id?: string
     type?: string
+    usage?: {
+      input_tokens?: number
+      output_tokens?: number
+      cache_read_input_tokens?: number
+      cache_creation_input_tokens?: number
+      server_tool_use?: {
+        web_search_requests?: number
+      }
+      speed?: string
+    }
   }
   timestamp?: string
+  version?: string
   snapshot?: {
     messageId?: string
     trackedFileBackups?: Record<string, unknown>
@@ -508,6 +557,153 @@ export class SessionService {
   private isValidSessionId(id: string): boolean {
     // UUID v4 format
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+  }
+
+  private formatCost(cost: number): string {
+    return `$${cost > 0.5 ? (Math.round(cost * 100) / 100).toFixed(2) : cost.toFixed(4)}`
+  }
+
+  async getTranscriptMetadata(sessionId: string): Promise<TranscriptMetadataSnapshot | null> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) return null
+
+    const entries = await this.readJsonlFile(found.filePath)
+    const metadata: TranscriptMetadataSnapshot = {}
+
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i]!
+      if (!metadata.model && typeof entry.message?.model === 'string') {
+        metadata.model = entry.message.model
+      }
+      if (!metadata.cwd && typeof entry.cwd === 'string') {
+        metadata.cwd = entry.cwd
+      }
+      if (!metadata.version && typeof entry.version === 'string') {
+        metadata.version = entry.version
+      }
+      if (metadata.model && metadata.cwd && metadata.version) break
+    }
+
+    return metadata
+  }
+
+  async getTranscriptUsage(sessionId: string): Promise<TranscriptUsageSnapshot | null> {
+    const found = await this.findSessionFile(sessionId)
+    if (!found) return null
+
+    const entries = await this.readJsonlFile(found.filePath)
+    const models = new Map<string, TranscriptUsageSnapshot['models'][number]>()
+    let totalCostUSD = 0
+    let totalInputTokens = 0
+    let totalOutputTokens = 0
+    let totalCacheReadInputTokens = 0
+    let totalCacheCreationInputTokens = 0
+    let totalWebSearchRequests = 0
+    let hasUnknownModelCost = false
+    let firstUsageAt: number | null = null
+    let lastUsageAt: number | null = null
+
+    for (const entry of entries) {
+      const usage = entry.message?.usage
+      const model = entry.message?.model
+      if (!usage || typeof model !== 'string') continue
+
+      const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0
+      const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : 0
+      const cacheReadInputTokens = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0
+      const cacheCreationInputTokens = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0
+      const webSearchRequests = typeof usage.server_tool_use?.web_search_requests === 'number'
+        ? usage.server_tool_use.web_search_requests
+        : 0
+
+      if (
+        inputTokens === 0 &&
+        outputTokens === 0 &&
+        cacheReadInputTokens === 0 &&
+        cacheCreationInputTokens === 0 &&
+        webSearchRequests === 0
+      ) {
+        continue
+      }
+
+      const canonical = getCanonicalName(model)
+      if (!Object.prototype.hasOwnProperty.call(MODEL_COSTS, canonical)) {
+        hasUnknownModelCost = true
+      }
+
+      const costUsage = {
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cache_read_input_tokens: cacheReadInputTokens,
+        cache_creation_input_tokens: cacheCreationInputTokens,
+        server_tool_use: { web_search_requests: webSearchRequests },
+        speed: usage.speed,
+      } as Parameters<typeof calculateUSDCost>[1]
+      const costUSD = calculateUSDCost(model, costUsage)
+
+      let modelUsage = models.get(model)
+      if (!modelUsage) {
+        modelUsage = {
+          model,
+          displayName: canonical,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          webSearchRequests: 0,
+          costUSD: 0,
+          costDisplay: '$0.0000',
+          contextWindow: getContextWindowForModel(model),
+          maxOutputTokens: getModelMaxOutputTokens(model).default,
+        }
+        models.set(model, modelUsage)
+      }
+
+      modelUsage.inputTokens += inputTokens
+      modelUsage.outputTokens += outputTokens
+      modelUsage.cacheReadInputTokens += cacheReadInputTokens
+      modelUsage.cacheCreationInputTokens += cacheCreationInputTokens
+      modelUsage.webSearchRequests += webSearchRequests
+      modelUsage.costUSD += costUSD
+      modelUsage.costDisplay = this.formatCost(modelUsage.costUSD)
+
+      totalCostUSD += costUSD
+      totalInputTokens += inputTokens
+      totalOutputTokens += outputTokens
+      totalCacheReadInputTokens += cacheReadInputTokens
+      totalCacheCreationInputTokens += cacheCreationInputTokens
+      totalWebSearchRequests += webSearchRequests
+
+      if (entry.timestamp) {
+        const time = Date.parse(entry.timestamp)
+        if (!Number.isNaN(time)) {
+          firstUsageAt = firstUsageAt === null ? time : Math.min(firstUsageAt, time)
+          lastUsageAt = lastUsageAt === null ? time : Math.max(lastUsageAt, time)
+        }
+      }
+    }
+
+    if (models.size === 0) return null
+
+    return {
+      source: 'transcript',
+      totalCostUSD,
+      costDisplay: this.formatCost(totalCostUSD),
+      hasUnknownModelCost,
+      totalAPIDuration: 0,
+      totalDuration:
+        firstUsageAt !== null && lastUsageAt !== null
+          ? Math.max(0, Math.round((lastUsageAt - firstUsageAt) / 1000))
+          : 0,
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
+      totalInputTokens,
+      totalOutputTokens,
+      totalCacheReadInputTokens,
+      totalCacheCreationInputTokens,
+      totalWebSearchRequests,
+      models: Array.from(models.values()),
+    }
   }
 
   // --------------------------------------------------------------------------

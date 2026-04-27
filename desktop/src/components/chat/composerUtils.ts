@@ -4,6 +4,9 @@ export const PANEL_SLASH_COMMANDS = [
   { name: 'mcp', description: 'Open available MCP tools for the current chat context' },
   { name: 'skills', description: 'Browse user-invocable skills for the current chat context' },
   { name: 'help', description: 'Show available desktop and agent commands' },
+  { name: 'status', description: 'Show session status, usage, and context' },
+  { name: 'cost', description: 'Show session usage and costs' },
+  { name: 'context', description: 'Show current context usage' },
 ] as const
 
 export const SETTINGS_SLASH_COMMANDS = [
@@ -25,15 +28,12 @@ export const FALLBACK_SLASH_COMMANDS = [
   { name: 'init', description: 'Initialize project CLAUDE.md' },
   { name: 'bug', description: 'Report a bug' },
   { name: 'config', description: 'Open configuration' },
-  { name: 'context', description: 'Show current context usage' },
-  { name: 'cost', description: 'Show token usage and costs' },
   { name: 'doctor', description: 'Diagnose installation issues' },
   { name: 'login', description: 'Switch Anthropic accounts' },
   { name: 'logout', description: 'Sign out of current account' },
   { name: 'memory', description: 'Edit CLAUDE.md memory files' },
   { name: 'model', description: 'Switch AI model' },
   { name: 'permissions', description: 'View or manage tool permissions' },
-  { name: 'status', description: 'Show project and session status' },
   { name: 'terminal-setup', description: 'Set up terminal integration' },
   { name: 'vim', description: 'Toggle vim editing mode' },
 ]

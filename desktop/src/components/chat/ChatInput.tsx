@@ -545,6 +545,7 @@ export function ChatInput({ variant = 'default' }: ChatInputProps) {
             <div ref={slashMenuRef}>
               <LocalSlashCommandPanel
                 command={localSlashPanel}
+                sessionId={activeTabId ?? undefined}
                 cwd={resolvedWorkDir}
                 commands={allSlashCommands}
                 onClose={() => setLocalSlashPanel(null)}

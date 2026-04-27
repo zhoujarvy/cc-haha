@@ -60,4 +60,10 @@ describe('composerUtils', () => {
     expect(mergeSlashCommands([]).map((command) => command.name)).toContain('plugin')
     expect(mergeSlashCommands([]).map((command) => command.name)).not.toContain('plugins')
   })
+
+  it('routes session inspection commands to the desktop panel', () => {
+    expect(resolveSlashUiAction('cost')).toEqual({ type: 'panel', command: 'cost' })
+    expect(resolveSlashUiAction('context')).toEqual({ type: 'panel', command: 'context' })
+    expect(resolveSlashUiAction('status')).toEqual({ type: 'panel', command: 'status' })
+  })
 })

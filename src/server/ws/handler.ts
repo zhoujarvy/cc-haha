@@ -1056,6 +1056,17 @@ function translateCliMessage(cliMsg: any, sessionId: string): ServerMessage[] {
         // Hook 执行中 — 不转发给前端
         return []
       }
+      if (subtype === 'local_command' || subtype === 'local_command_output') {
+        const localCommandOutput = extractLocalCommandOutput(
+          cliMsg.content ?? cliMsg.message,
+          { allowUntagged: subtype === 'local_command_output' },
+        )
+        if (!localCommandOutput) return []
+        return [
+          { type: 'content_start', blockType: 'text' },
+          { type: 'content_delta', text: localCommandOutput },
+        ]
+      }
       // Bug #7: 处理 task/team system 消息
       if (subtype === 'task_notification') {
         return [{
@@ -1124,7 +1135,10 @@ function getDesktopSlashCommand(content: string): ReturnType<typeof parseSlashCo
   return parsed
 }
 
-function extractLocalCommandOutput(content: unknown): string | null {
+function extractLocalCommandOutput(
+  content: unknown,
+  options: { allowUntagged?: boolean } = {},
+): string | null {
   const raw = typeof content === 'string'
     ? content
     : Array.isArray(content)
@@ -1143,7 +1157,14 @@ function extractLocalCommandOutput(content: unknown): string | null {
   if (stdout !== null) return stdout
 
   const stderr = extractTaggedContent(raw, LOCAL_COMMAND_STDERR_TAG)
-  return stderr
+  if (stderr !== null) return stderr
+
+  if (options.allowUntagged) {
+    const normalized = raw.trim()
+    return normalized || null
+  }
+
+  return null
 }
 
 function extractTaggedContent(raw: string, tag: string): string | null {

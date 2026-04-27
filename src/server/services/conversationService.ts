@@ -34,6 +34,7 @@ type SessionProcess = {
   pendingOutbound: string[]
   stderrLines: string[]
   sdkMessages: any[]
+  initMessage: any | null
   pendingPermissionRequests: Map<
     string,
     {
@@ -173,6 +174,7 @@ export class ConversationService {
       pendingOutbound: [],
       stderrLines: [],
       sdkMessages: [],
+      initMessage: null,
       pendingPermissionRequests: new Map(),
     }
     this.sessions.set(sessionId, session)
@@ -232,8 +234,18 @@ export class ConversationService {
     }
   }
 
+  removeOutputCallback(sessionId: string, callback: (msg: any) => void): void {
+    const session = this.sessions.get(sessionId)
+    if (!session) return
+    session.outputCallbacks = session.outputCallbacks.filter((entry) => entry !== callback)
+  }
+
   getRecentSdkMessages(sessionId: string): any[] {
     return [...(this.sessions.get(sessionId)?.sdkMessages ?? [])]
+  }
+
+  getSessionInitMessage(sessionId: string): any | null {
+    return this.sessions.get(sessionId)?.initMessage ?? null
   }
 
   sendMessage(
@@ -309,6 +321,60 @@ export class ConversationService {
     })
   }
 
+  requestControl(
+    sessionId: string,
+    request: Record<string, unknown>,
+    timeoutMs = 10_000,
+  ): Promise<Record<string, unknown>> {
+    if (!this.sessions.has(sessionId)) {
+      return Promise.reject(new Error('CLI session is not running'))
+    }
+
+    const requestId = crypto.randomUUID()
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.removeOutputCallback(sessionId, handleOutput)
+        reject(new Error(`Timed out waiting for ${String(request.subtype ?? 'control')} response`))
+      }, timeoutMs)
+
+      const finish = (fn: () => void) => {
+        clearTimeout(timeout)
+        this.removeOutputCallback(sessionId, handleOutput)
+        fn()
+      }
+
+      const handleOutput = (msg: any) => {
+        if (
+          msg?.type !== 'control_response' ||
+          msg.response?.request_id !== requestId
+        ) {
+          return
+        }
+
+        if (msg.response.subtype === 'error') {
+          finish(() => reject(new Error(String(msg.response.error || 'Control request failed'))))
+          return
+        }
+
+        finish(() => resolve(
+          msg.response.response && typeof msg.response.response === 'object'
+            ? msg.response.response as Record<string, unknown>
+            : {},
+        ))
+      }
+
+      this.onOutput(sessionId, handleOutput)
+      const sent = this.sendSdkMessage(sessionId, {
+        type: 'control_request',
+        request_id: requestId,
+        request,
+      })
+      if (!sent) {
+        finish(() => reject(new Error('CLI session is not running')))
+      }
+    })
+  }
+
   hasSession(sessionId: string): boolean {
     return this.sessions.has(sessionId)
   }
@@ -370,6 +436,9 @@ export class ConversationService {
         session.sdkMessages.push(msg)
         if (session.sdkMessages.length > 40) {
           session.sdkMessages.splice(0, 20)
+        }
+        if (msg?.type === 'system' && msg.subtype === 'init') {
+          session.initMessage = msg
         }
         if (
           msg?.type === 'control_request' &&

@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 
@@ -71,6 +71,8 @@ describe('TabBar', () => {
   })
 
   afterEach(async () => {
+    cleanup()
+
     const { useTabStore } = await import('../../stores/tabStore')
     const { useChatStore } = await import('../../stores/chatStore')
     const { useWorkspacePanelStore } = await import('../../stores/workspacePanelStore')

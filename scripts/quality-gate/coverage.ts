@@ -17,6 +17,14 @@ type CoverageSummary = {
   statements: CoverageMetric
 }
 
+type CoverageScope = {
+  id: string
+  title: string
+  includePrefixes: string[]
+  excludePrefixes?: string[]
+  excludeSuffixes?: string[]
+}
+
 type SuiteCoverage = {
   id: string
   title: string
@@ -31,6 +39,10 @@ type SuiteCoverage = {
 type CoverageThresholds = {
   schemaVersion: 1
   minimums: Record<string, Partial<Record<keyof CoverageSummary, number>>>
+  targets?: Record<string, Partial<Record<keyof CoverageSummary, number>>>
+  changedLines?: {
+    minimumPercent: number
+  }
   ratchet?: {
     baselinePath: string
     allowedDropPercent: number
@@ -51,11 +63,92 @@ type CoverageReport = {
   outputDir: string
   baselineRef?: string
   suites: SuiteCoverage[]
+  changedLines?: ChangedLineCoverage
+  targetGaps: string[]
+  failures: string[]
+}
+
+type LcovRecord = {
+  file: string
+  linesTotal: number
+  linesCovered: number
+  functionsTotal: number
+  functionsCovered: number
+  branchesTotal: number
+  branchesCovered: number
+  lineHits: Map<number, number>
+}
+
+type FileLineCoverage = {
+  suiteId: string
+  executableLines: Set<number>
+  coveredLines: Set<number>
+}
+
+type ChangedLineCoverage = {
+  minimumPercent: number
+  covered: number
+  total: number
+  pct: number
+  files: Array<{
+    file: string
+    suiteId: string
+    covered: number
+    total: number
+    pct: number
+    reason?: string
+  }>
   failures: string[]
 }
 
 const ROOT_DIR = process.cwd()
 const DEFAULT_THRESHOLDS_PATH = join(ROOT_DIR, 'scripts', 'quality-gate', 'coverage-thresholds.json')
+
+const ROOT_COVERAGE_SCOPES: CoverageScope[] = [
+  {
+    id: 'server-api',
+    title: 'Server/API',
+    includePrefixes: ['src/server/'],
+    excludeSuffixes: ['.test.ts', '.test.tsx'],
+  },
+  {
+    id: 'agent-tools',
+    title: 'Agent tools',
+    includePrefixes: ['src/tools/'],
+    excludeSuffixes: ['.test.ts', '.test.tsx'],
+  },
+  {
+    id: 'agent-utils',
+    title: 'Agent utils',
+    includePrefixes: ['src/utils/'],
+    excludeSuffixes: ['.test.ts', '.test.tsx'],
+  },
+]
+
+const ADAPTERS_SCOPE: CoverageScope = {
+  id: 'adapters',
+  title: 'IM adapters',
+  includePrefixes: ['adapters/'],
+  excludePrefixes: ['adapters/node_modules/'],
+  excludeSuffixes: ['.test.ts', '.test.tsx', '.d.ts'],
+}
+
+const DESKTOP_SCOPE: CoverageScope = {
+  id: 'desktop',
+  title: 'Desktop React',
+  includePrefixes: ['desktop/src/'],
+  excludePrefixes: [
+    'desktop/src/mocks/',
+    'desktop/src/types/',
+  ],
+  excludeSuffixes: ['.test.ts', '.test.tsx', '.d.ts', 'vite-env.d.ts'],
+}
+
+const CHANGED_LINE_SCOPES = [
+  ...ROOT_COVERAGE_SCOPES,
+  ADAPTERS_SCOPE,
+  DESKTOP_SCOPE,
+]
 
 function nowId() {
   return new Date().toISOString().replace(/[:.]/g, '-')
@@ -89,6 +182,28 @@ function normalize(path: string, rootDir = ROOT_DIR) {
   return relative(rootDir, path).split(sep).join('/')
 }
 
+function normalizeCoveragePath(path: string, rootDir = ROOT_DIR) {
+  const normalized = path.replace(/\\/g, '/')
+  if (normalized.startsWith('/')) {
+    return relative(rootDir, normalized).split(sep).join('/')
+  }
+  return normalized.replace(/^\.\//, '')
+}
+
+function matchesScope(file: string, scope: CoverageScope) {
+  const normalized = file.replace(/\\/g, '/')
+  if (!scope.includePrefixes.some((prefix) => normalized.startsWith(prefix))) {
+    return false
+  }
+  if (scope.excludePrefixes?.some((prefix) => normalized.startsWith(prefix))) {
+    return false
+  }
+  if (scope.excludeSuffixes?.some((suffix) => normalized.endsWith(suffix))) {
+    return false
+  }
+  return true
+}
+
 function walkTestFiles(path: string, files: string[], excluded: Set<string>, rootDir = ROOT_DIR) {
   const stat = statSync(path)
   if (stat.isDirectory()) {
@@ -114,7 +229,62 @@ function collectServerTestFiles(rootDir = ROOT_DIR) {
   return files.sort()
 }
 
-export function parseLcov(content: string): CoverageSummary {
+function parseLcovRecords(content: string, options: {
+  rootDir?: string
+  scope?: CoverageScope
+} = {}) {
+  const records: LcovRecord[] = []
+  let current: LcovRecord | null = null
+
+  function flush() {
+    if (!current) return
+    if (!options.scope || matchesScope(current.file, options.scope)) {
+      records.push(current)
+    }
+    current = null
+  }
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (line === 'end_of_record') {
+      flush()
+      continue
+    }
+    if (line.startsWith('SF:')) {
+      flush()
+      current = {
+        file: normalizeCoveragePath(line.slice(3), options.rootDir),
+        linesTotal: 0,
+        linesCovered: 0,
+        functionsTotal: 0,
+        functionsCovered: 0,
+        branchesTotal: 0,
+        branchesCovered: 0,
+        lineHits: new Map(),
+      }
+      continue
+    }
+    if (!current) continue
+    if (line.startsWith('LF:')) current.linesTotal += Number(line.slice(3)) || 0
+    if (line.startsWith('LH:')) current.linesCovered += Number(line.slice(3)) || 0
+    if (line.startsWith('FNF:')) current.functionsTotal += Number(line.slice(4)) || 0
+    if (line.startsWith('FNH:')) current.functionsCovered += Number(line.slice(4)) || 0
+    if (line.startsWith('BRF:')) current.branchesTotal += Number(line.slice(4)) || 0
+    if (line.startsWith('BRH:')) current.branchesCovered += Number(line.slice(4)) || 0
+    if (line.startsWith('DA:')) {
+      const [lineNumber, hits] = line.slice(3).split(',')
+      const parsedLine = Number(lineNumber)
+      if (Number.isFinite(parsedLine)) {
+        current.lineHits.set(parsedLine, Number(hits) || 0)
+      }
+    }
+  }
+
+  flush()
+  return records
+}
+
+function summarizeLcovRecords(records: LcovRecord[]): CoverageSummary {
   let linesTotal = 0
   let linesCovered = 0
   let functionsTotal = 0
@@ -122,14 +292,13 @@ export function parseLcov(content: string): CoverageSummary {
   let branchesTotal = 0
   let branchesCovered = 0
 
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim()
-    if (line.startsWith('LF:')) linesTotal += Number(line.slice(3)) || 0
-    if (line.startsWith('LH:')) linesCovered += Number(line.slice(3)) || 0
-    if (line.startsWith('FNF:')) functionsTotal += Number(line.slice(4)) || 0
-    if (line.startsWith('FNH:')) functionsCovered += Number(line.slice(4)) || 0
-    if (line.startsWith('BRF:')) branchesTotal += Number(line.slice(4)) || 0
-    if (line.startsWith('BRH:')) branchesCovered += Number(line.slice(4)) || 0
+  for (const record of records) {
+    linesTotal += record.linesTotal
+    linesCovered += record.linesCovered
+    functionsTotal += record.functionsTotal
+    functionsCovered += record.functionsCovered
+    branchesTotal += record.branchesTotal
+    branchesCovered += record.branchesCovered
   }
 
   return {
@@ -138,6 +307,29 @@ export function parseLcov(content: string): CoverageSummary {
     branches: metric(branchesCovered, branchesTotal),
     statements: metric(linesCovered, linesTotal),
   }
+}
+
+export function parseLcov(content: string, options: {
+  rootDir?: string
+  scope?: CoverageScope
+} = {}): CoverageSummary {
+  return summarizeLcovRecords(parseLcovRecords(content, options))
+}
+
+function lcovLineCoverage(content: string, suiteId: string, scope: CoverageScope, rootDir = ROOT_DIR) {
+  const coverage = new Map<string, FileLineCoverage>()
+  for (const record of parseLcovRecords(content, { rootDir, scope })) {
+    const executableLines = new Set<number>()
+    const coveredLines = new Set<number>()
+    for (const [line, hits] of record.lineHits) {
+      executableLines.add(line)
+      if (hits > 0) {
+        coveredLines.add(line)
+      }
+    }
+    coverage.set(record.file, { suiteId, executableLines, coveredLines })
+  }
+  return coverage
 }
 
 function parseVitestSummary(path: string): CoverageSummary {
@@ -238,6 +430,136 @@ function readGitFile(rootDir: string, ref: string, filePath: string) {
   return new TextDecoder().decode(proc.stdout)
 }
 
+export function parseChangedLinesFromDiff(diff: string) {
+  const changed = new Map<string, Set<number>>()
+  let currentFile: string | null = null
+  let nextLine = 0
+
+  for (const rawLine of diff.split(/\r?\n/)) {
+    if (rawLine.startsWith('+++ ')) {
+      const file = rawLine.slice(4).trim()
+      currentFile = file === '/dev/null' ? null : file.replace(/^b\//, '')
+      continue
+    }
+
+    const hunk = rawLine.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/)
+    if (hunk) {
+      nextLine = Number(hunk[1])
+      continue
+    }
+
+    if (!currentFile || nextLine === 0) continue
+    if (rawLine.startsWith('+++')) continue
+    if (rawLine.startsWith('+')) {
+      let lines = changed.get(currentFile)
+      if (!lines) {
+        lines = new Set()
+        changed.set(currentFile, lines)
+      }
+      lines.add(nextLine)
+      nextLine += 1
+      continue
+    }
+    if (rawLine.startsWith('-')) continue
+    if (rawLine.length > 0) {
+      nextLine += 1
+    }
+  }
+
+  return changed
+}
+
+function gitOutput(rootDir: string, args: string[]) {
+  const proc = Bun.spawnSync(['git', ...args], {
+    cwd: rootDir,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  if (proc.exitCode !== 0) return null
+  return new TextDecoder().decode(proc.stdout)
+}
+
+function collectChangedLines(rootDir: string, baseRef?: string) {
+  const explicitBase = baseRef?.trim()
+  if (explicitBase) {
+    const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', `${explicitBase}...HEAD`, '--'])
+    return diff ? parseChangedLinesFromDiff(diff) : new Map<string, Set<number>>()
+  }
+
+  const dirty = gitOutput(rootDir, ['diff', '--name-only', '--'])
+  if (dirty?.trim()) {
+    const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', 'HEAD', '--'])
+    return diff ? parseChangedLinesFromDiff(diff) : new Map<string, Set<number>>()
+  }
+
+  const branch = gitOutput(rootDir, ['branch', '--show-current'])?.trim()
+  const hasOriginMain = gitOutput(rootDir, ['rev-parse', '--verify', 'origin/main'])
+  if (branch && branch !== 'main' && hasOriginMain) {
+    const diff = gitOutput(rootDir, ['diff', '--unified=0', '--no-ext-diff', 'origin/main...HEAD', '--'])
+    return diff ? parseChangedLinesFromDiff(diff) : new Map<string, Set<number>>()
+  }
+
+  return new Map<string, Set<number>>()
+}
+
+export function evaluateChangedLineCoverage(
+  changedLines: Map<string, Set<number>>,
+  coverageByFile: Map<string, FileLineCoverage>,
+  scopes: CoverageScope[],
+  minimumPercent: number,
+): ChangedLineCoverage {
+  const files: ChangedLineCoverage['files'] = []
+  let total = 0
+  let covered = 0
+
+  for (const [file, lines] of [...changedLines.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const scope = scopes.find((candidate) => matchesScope(file, candidate))
+    if (!scope) continue
+
+    const fileCoverage = coverageByFile.get(file)
+    if (!fileCoverage) {
+      const lineCount = lines.size
+      total += lineCount
+      files.push({
+        file,
+        suiteId: scope.id,
+        covered: 0,
+        total: lineCount,
+        pct: 0,
+        reason: 'no coverage data for changed source file',
+      })
+      continue
+    }
+
+    const executableChangedLines = [...lines].filter((line) => fileCoverage.executableLines.has(line))
+    if (executableChangedLines.length === 0) continue
+    const fileCovered = executableChangedLines.filter((line) => fileCoverage.coveredLines.has(line)).length
+    total += executableChangedLines.length
+    covered += fileCovered
+    files.push({
+      file,
+      suiteId: fileCoverage.suiteId,
+      covered: fileCovered,
+      total: executableChangedLines.length,
+      pct: pct(fileCovered, executableChangedLines.length),
+    })
+  }
+
+  const coverage = pct(covered, total)
+  const failures = total > 0 && coverage + Number.EPSILON < minimumPercent
+    ? [`changed-lines: coverage ${coverage}% is below minimum ${minimumPercent}%`]
+    : []
+
+  return {
+    minimumPercent,
+    covered,
+    total,
+    pct: coverage,
+    files,
+    failures,
+  }
+}
+
 function loadBaseline(path: string, rootDir = ROOT_DIR, baselineRef?: string): BaselineFile | null {
   if (baselineRef) {
     const raw = readGitFile(rootDir, baselineRef, path)
@@ -289,6 +611,21 @@ export function evaluateThresholds(
   return failures
 }
 
+function evaluateTargetGaps(suites: SuiteCoverage[], thresholds: CoverageThresholds) {
+  const gaps: string[] = []
+  for (const suite of suites) {
+    if (suite.status !== 'passed' || !suite.summary) continue
+    const targets = thresholds.targets?.[suite.id] ?? {}
+    for (const [metricName, target] of Object.entries(targets)) {
+      const actual = suite.summary[metricName as keyof CoverageSummary].pct
+      if (actual + Number.EPSILON < target) {
+        gaps.push(`${suite.id}: ${metricName} coverage ${actual}% is below target ${target}%`)
+      }
+    }
+  }
+  return gaps
+}
+
 function renderReport(report: CoverageReport) {
   const lines = [
     '# Coverage Report',
@@ -315,6 +652,33 @@ function renderReport(report: CoverageReport) {
     ].join(' | ')} |`)
   }
 
+  lines.push('', '## Changed Lines', '')
+  if (!report.changedLines) {
+    lines.push('- not evaluated')
+  } else if (report.changedLines.total === 0) {
+    lines.push(`- No changed executable production lines matched the coverage scopes. Minimum: ${report.changedLines.minimumPercent}%`)
+  } else {
+    lines.push(
+      `- Coverage: ${report.changedLines.pct}% (${report.changedLines.covered}/${report.changedLines.total})`,
+      `- Minimum: ${report.changedLines.minimumPercent}%`,
+      '',
+      '| File | Suite | Lines | Reason |',
+      '| --- | --- | ---: | --- |',
+    )
+    for (const file of report.changedLines.files) {
+      lines.push(`| ${file.file} | ${file.suiteId} | ${file.pct}% (${file.covered}/${file.total}) | ${file.reason ?? '-'} |`)
+    }
+  }
+
+  lines.push('', '## Target Gaps', '')
+  if (report.targetGaps.length === 0) {
+    lines.push('- none')
+  } else {
+    for (const gap of report.targetGaps) {
+      lines.push(`- ${gap}`)
+    }
+  }
+
   lines.push('', '## Failures', '')
   if (report.failures.length === 0) {
     lines.push('- none')
@@ -333,6 +697,7 @@ export async function runCoverageGate(options: {
   runId?: string
   thresholdsPath?: string
   baselineRef?: string
+  changedBaseRef?: string
 } = {}) {
   const rootDir = options.rootDir ?? ROOT_DIR
   const runId = options.runId ?? nowId()
@@ -343,26 +708,55 @@ export async function runCoverageGate(options: {
 
   const serverFiles = collectServerTestFiles(rootDir)
   const suites: SuiteCoverage[] = []
+  const coverageByFile = new Map<string, FileLineCoverage>()
 
-  suites.push(await runSuite(
-    'root-server',
-    'Root server/tools/utils',
-    ['bun', 'test', '--coverage', '--coverage-reporter=lcov', '--coverage-reporter=text', '--coverage-dir', join(outputDir, 'root-server'), ...serverFiles],
-    rootDir,
-    join(outputDir, 'root-server'),
-    () => parseLcov(readFileSync(join(outputDir, 'root-server', 'lcov.info'), 'utf8')),
-  ))
+  const rootCommand = ['bun', 'test', '--coverage', '--coverage-reporter=lcov', '--coverage-reporter=text', '--coverage-dir', join(outputDir, 'root-server'), ...serverFiles]
+  const rootLogPath = join(outputDir, 'root-server', 'coverage.log')
+  mkdirSync(join(outputDir, 'root-server'), { recursive: true })
+  const rootResult = await runCommand(rootCommand, rootDir, rootLogPath)
+  const rootLcovPath = join(outputDir, 'root-server', 'lcov.info')
+  const rootLcov = rootResult.exitCode === 0 && existsSync(rootLcovPath)
+    ? readFileSync(rootLcovPath, 'utf8')
+    : ''
+  for (const scope of ROOT_COVERAGE_SCOPES) {
+    const summary = rootResult.exitCode === 0
+      ? parseLcov(rootLcov, { rootDir, scope })
+      : undefined
+    suites.push({
+      id: scope.id,
+      title: scope.title,
+      status: rootResult.exitCode === 0 ? 'passed' : 'failed',
+      command: rootCommand,
+      durationMs: rootResult.durationMs,
+      logPath: rootLogPath,
+      ...(summary ? { summary } : {}),
+      ...(rootResult.exitCode !== 0 ? { error: `coverage command exited with ${rootResult.exitCode}` } : {}),
+    })
+    if (rootResult.exitCode === 0) {
+      for (const [file, coverage] of lcovLineCoverage(rootLcov, scope.id, scope, rootDir)) {
+        coverageByFile.set(file, coverage)
+      }
+    }
+  }
 
-  suites.push(await runSuite(
+  const adapters = await runSuite(
     'adapters',
     'IM adapters',
     ['bun', 'test', '--coverage', '--coverage-reporter=lcov', '--coverage-reporter=text', '--coverage-dir', join(outputDir, 'adapters')],
     join(rootDir, 'adapters'),
     join(outputDir, 'adapters'),
     () => parseLcov(readFileSync(join(outputDir, 'adapters', 'lcov.info'), 'utf8')),
-  ))
+  )
+  suites.push(adapters)
+  const adaptersLcovPath = join(outputDir, 'adapters', 'lcov.info')
+  if (adapters.status === 'passed' && existsSync(adaptersLcovPath)) {
+    const adaptersLcov = readFileSync(adaptersLcovPath, 'utf8')
+    for (const [file, coverage] of lcovLineCoverage(adaptersLcov, 'adapters', ADAPTERS_SCOPE, rootDir)) {
+      coverageByFile.set(file, coverage)
+    }
+  }
 
-  suites.push(await runSuite(
+  const desktop = await runSuite(
     'desktop',
     'Desktop React',
     [
@@ -380,10 +774,31 @@ export async function runCoverageGate(options: {
     join(rootDir, 'desktop'),
     join(outputDir, 'desktop'),
     () => parseVitestSummary(join(outputDir, 'desktop', 'coverage-summary.json')),
-  ))
+  )
+  suites.push(desktop)
+  const desktopLcovPath = join(outputDir, 'desktop', 'lcov.info')
+  if (desktop.status === 'passed' && existsSync(desktopLcovPath)) {
+    const desktopLcov = readFileSync(desktopLcovPath, 'utf8')
+    for (const [file, coverage] of lcovLineCoverage(desktopLcov, 'desktop', DESKTOP_SCOPE, rootDir)) {
+      coverageByFile.set(file, coverage)
+    }
+  }
 
   const thresholds = loadThresholds(options.thresholdsPath ?? join(rootDir, 'scripts', 'quality-gate', 'coverage-thresholds.json'))
   const failures = evaluateThresholds(suites, thresholds, rootDir, baselineRef)
+  const changedLineMinimum = thresholds.changedLines?.minimumPercent
+  const changedLines = typeof changedLineMinimum === 'number'
+    ? evaluateChangedLineCoverage(
+      collectChangedLines(rootDir, options.changedBaseRef ?? process.env.COVERAGE_BASE_REF),
+      coverageByFile,
+      CHANGED_LINE_SCOPES,
+      changedLineMinimum,
+    )
+    : undefined
+  if (changedLines) {
+    failures.push(...changedLines.failures)
+  }
+  const targetGaps = evaluateTargetGaps(suites, thresholds)
   const report: CoverageReport = {
     schemaVersion: 1,
     runId,
@@ -392,6 +807,8 @@ export async function runCoverageGate(options: {
     outputDir,
     ...(baselineRef ? { baselineRef } : {}),
     suites,
+    ...(changedLines ? { changedLines } : {}),
+    targetGaps,
     failures,
   }
 
@@ -407,6 +824,7 @@ if (import.meta.main) {
     runId: typeof args.get('--run-id') === 'string' ? String(args.get('--run-id')) : undefined,
     thresholdsPath: typeof args.get('--thresholds') === 'string' ? String(args.get('--thresholds')) : undefined,
     baselineRef: typeof args.get('--baseline-ref') === 'string' ? String(args.get('--baseline-ref')) : undefined,
+    changedBaseRef: typeof args.get('--changed-base') === 'string' ? String(args.get('--changed-base')) : undefined,
   })
   console.log(`Coverage report: ${report.outputDir}/coverage-report.md`)
   console.log(`Summary: passed=${report.suites.filter((suite) => suite.status === 'passed').length} failed=${report.failures.length}`)

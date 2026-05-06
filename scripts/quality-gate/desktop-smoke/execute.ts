@@ -247,7 +247,14 @@ export async function executeDesktopSmoke(
   void pipeToFile(server.stdout, serverLogPath)
   void pipeToFile(server.stderr, serverLogPath)
 
-  const vite = Bun.spawn(['bun', 'run', 'dev', '--', '--host', '127.0.0.1', '--port', String(vitePort), '--strictPort'], {
+  const viteExecutable = join(
+    rootDir,
+    'desktop',
+    'node_modules',
+    '.bin',
+    process.platform === 'win32' ? 'vite.cmd' : 'vite',
+  )
+  const vite = Bun.spawn([viteExecutable, '--host', '127.0.0.1', '--port', String(vitePort), '--strictPort'], {
     cwd: join(rootDir, 'desktop'),
     env: {
       ...process.env,

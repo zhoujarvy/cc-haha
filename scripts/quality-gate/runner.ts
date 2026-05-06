@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { baselineCases } from './baseline/cases'
 import { executeBaselineCase } from './baseline/execute'
@@ -6,7 +6,16 @@ import { executeDesktopSmoke } from './desktop-smoke/execute'
 import { lanesForMode } from './modes'
 import { executeProviderSmoke } from './provider-smoke/execute'
 import { writeReport } from './reporter'
-import type { LaneDefinition, LaneResult, QualityGateOptions, QualityGateReport } from './types'
+import type {
+  CoverageSuiteSummary,
+  ImpactSummary,
+  LaneCategory,
+  LaneDefinition,
+  LaneResult,
+  QualityGateOptions,
+  QualityGateReport,
+  ReportArtifact,
+} from './types'
 
 type LaneExecutor = (lane: LaneDefinition, options: QualityGateOptions) => Promise<LaneResult>
 
@@ -107,6 +116,42 @@ async function runCommandLane(lane: LaneDefinition, options: QualityGateOptions)
 
   mkdirSync(dirname(logPath), { recursive: true })
   writeFileSync(logPath, `$ ${command.join(' ')}\n`)
+
+  if (options.mode === 'pr' && lane.impactRequiredCheck) {
+    const requiredChecks = readImpactRequiredChecks(options)
+    if (!requiredChecks) {
+      const error = `Impact report unavailable before ${lane.impactRequiredCheck}`
+      appendFileSync(logPath, `[quality-gate] failed: ${error}\n`)
+      return {
+        id: lane.id,
+        title: lane.title,
+        status: 'failed',
+        command,
+        durationMs: Date.now() - started,
+        error,
+        logPath,
+      }
+    }
+
+    const requiredCheck = normalizeImpactCheck(lane.impactRequiredCheck)
+    if (!requiredChecks.includes(requiredCheck)) {
+      const skipReason = `${requiredCheck} not required by impact report`
+      appendFileSync(logPath, `[quality-gate] skipped: ${skipReason}\n`)
+      return {
+        id: lane.id,
+        title: lane.title,
+        status: 'skipped',
+        command,
+        durationMs: Date.now() - started,
+        skipReason,
+        logPath,
+      }
+    }
+  }
+
+  const streamLogs = process.env.QUALITY_GATE_STREAM_LOGS === '1'
+  const writeStdout = streamLogs ? (chunk: Buffer) => process.stdout.write(chunk) : () => {}
+  const writeStderr = streamLogs ? (chunk: Buffer) => process.stderr.write(chunk) : () => {}
   const proc = Bun.spawn(command, {
     cwd: options.rootDir,
     stdout: 'pipe',
@@ -114,8 +159,8 @@ async function runCommandLane(lane: LaneDefinition, options: QualityGateOptions)
   })
   const [exitCode] = await Promise.all([
     proc.exited,
-    pipeToLog(proc.stdout, logPath, (chunk) => process.stdout.write(chunk)),
-    pipeToLog(proc.stderr, logPath, (chunk) => process.stderr.write(chunk)),
+    pipeToLog(proc.stdout, logPath, writeStdout),
+    pipeToLog(proc.stderr, logPath, writeStderr),
   ])
 
   return {
@@ -224,6 +269,146 @@ function summarize(results: LaneResult[]) {
   }
 }
 
+function defaultCategoryForLane(lane: LaneDefinition): LaneCategory {
+  if (lane.category) return lane.category
+  if (lane.id === 'impact-report') return 'scope'
+  if (lane.id === 'coverage') return 'coverage'
+  if (lane.id === 'native-checks') return 'native'
+  if (lane.kind === 'baseline-case') return 'integration'
+  if (lane.kind === 'provider-smoke' || lane.kind === 'desktop-smoke') return 'smoke'
+  if (lane.id.includes('test') || lane.id.includes('checks')) return 'unit'
+  return 'governance'
+}
+
+function withLaneMetadata(lane: LaneDefinition, result: LaneResult): LaneResult {
+  return {
+    ...result,
+    description: lane.description,
+    category: defaultCategoryForLane(lane),
+    live: Boolean(lane.live),
+  }
+}
+
+function readText(path: string | undefined) {
+  if (!path || !existsSync(path)) return null
+  return readFileSync(path, 'utf8')
+}
+
+function readSection(lines: string[], heading: string) {
+  const items: string[] = []
+  let active = false
+
+  for (const line of lines) {
+    if (line.startsWith('## ')) {
+      active = line.trim() === `## ${heading}`
+      continue
+    }
+
+    if (!active) continue
+    if (line.startsWith('- ')) {
+      items.push(line.slice(2).trim())
+    }
+  }
+
+  return items
+}
+
+function normalizeImpactCheck(value: string) {
+  return value.replace(/`/g, '').replace(/\s+/g, ' ').trim()
+}
+
+function impactReportLogPath(options: QualityGateOptions) {
+  const artifactRoot = options.runOutputDir ?? join(options.rootDir, 'artifacts', 'quality-runs', options.runId ?? 'current')
+  return join(artifactRoot, 'logs', 'impact-report.log')
+}
+
+function readImpactRequiredChecks(options: QualityGateOptions) {
+  const log = readText(impactReportLogPath(options))
+  if (!log) return null
+  return readSection(log.split(/\r?\n/), 'Required local checks').map(normalizeImpactCheck)
+}
+
+function splitSummaryList(value: string | undefined) {
+  if (!value || value === 'none') return []
+  return value.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function parseImpactSummary(results: LaneResult[]): ImpactSummary | undefined {
+  const impact = results.find((result) => result.id === 'impact-report')
+  const log = readText(impact?.logPath)
+  if (!log) return undefined
+
+  const lines = log.split(/\r?\n/)
+  const findValue = (label: string) => {
+    const prefix = `${label}:`
+    return lines.find((line) => line.startsWith(prefix))?.slice(prefix.length).trim()
+  }
+
+  const changedFiles = Number(findValue('Changed files'))
+
+  return {
+    ...(Number.isFinite(changedFiles) ? { changedFiles } : {}),
+    areas: splitSummaryList(findValue('Areas')),
+    labels: splitSummaryList(findValue('Labels')),
+    blocked: findValue('Blocked') === 'yes' ? true : findValue('Blocked') === 'no' ? false : undefined,
+    requiredChecks: readSection(lines, 'Required local checks'),
+    testCoverageSignals: readSection(lines, 'Test coverage signals'),
+    riskNotes: readSection(lines, 'Risk notes'),
+  }
+}
+
+function coverageReportPathFromLog(results: LaneResult[]) {
+  const coverage = results.find((result) => result.id === 'coverage')
+  const log = readText(coverage?.logPath)
+  if (!log) return null
+  return log.match(/Coverage report:\s*(.+coverage-report\.md)/)?.[1]?.trim() ?? null
+}
+
+function parseCoverageSummary(results: LaneResult[]) {
+  const reportPath = coverageReportPathFromLog(results)
+  if (!reportPath) return undefined
+
+  const jsonPath = reportPath.replace(/coverage-report\.md$/, 'coverage-report.json')
+  if (!existsSync(jsonPath)) return undefined
+
+  const parsed = JSON.parse(readFileSync(jsonPath, 'utf8')) as {
+    suites?: Array<CoverageSuiteSummary & {
+      summary?: Pick<CoverageSuiteSummary, 'lines' | 'functions' | 'branches' | 'statements'>
+    }>
+    failures?: string[]
+  }
+
+  return {
+    reportPath,
+    suites: (parsed.suites ?? []).map((suite) => ({
+      id: suite.id,
+      title: suite.title,
+      status: suite.status,
+      lines: suite.lines ?? suite.summary?.lines,
+      functions: suite.functions ?? suite.summary?.functions,
+      branches: suite.branches ?? suite.summary?.branches,
+      statements: suite.statements ?? suite.summary?.statements,
+    })),
+    failures: parsed.failures ?? [],
+  }
+}
+
+function collectReportArtifacts(outputDir: string, results: LaneResult[]): ReportArtifact[] {
+  const artifacts: ReportArtifact[] = [
+    { title: 'Quality report markdown', path: join(outputDir, 'report.md') },
+    { title: 'Quality report JSON', path: join(outputDir, 'report.json') },
+    { title: 'Quality report JUnit', path: join(outputDir, 'junit.xml') },
+  ]
+
+  const coveragePath = coverageReportPathFromLog(results)
+  if (coveragePath) {
+    artifacts.push({ title: 'Coverage report markdown', path: coveragePath })
+    artifacts.push({ title: 'Coverage report JSON', path: coveragePath.replace(/coverage-report\.md$/, 'coverage-report.json') })
+  }
+
+  return artifacts
+}
+
 function enforceReleaseLiveLanes(
   options: QualityGateOptions,
   lanes: LaneDefinition[],
@@ -267,7 +452,7 @@ export async function runQualityGateLanes(
   const rawResults: LaneResult[] = []
   for (const lane of selectedLanes) {
     const result = await executeLane(lane, runOptions)
-    rawResults.push(result)
+    rawResults.push(withLaneMetadata(lane, result))
   }
   const results = enforceReleaseLiveLanes(options, selectedLanes, rawResults)
 
@@ -282,6 +467,9 @@ export async function runQualityGateLanes(
     rootDir: options.rootDir,
     git: await gitInfo(options.rootDir),
     results,
+    impact: parseImpactSummary(results),
+    coverage: parseCoverageSummary(results),
+    artifacts: collectReportArtifacts(outputDir, results),
     summary: summarize(results),
   }
 

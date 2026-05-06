@@ -232,3 +232,57 @@ jobs:
           name: coverage-report
           path: artifacts/coverage/
           retention-days: 14
+
+  pr-quality-gate:
+    name: pr-quality-gate
+    needs:
+      - change-policy
+      - desktop-checks
+      - server-checks
+      - adapter-checks
+      - desktop-native-checks
+      - docs-checks
+      - coverage-checks
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all selected quality jobs to pass
+        run: |
+          failures=0
+
+          require_success() {
+            local name="$1"
+            local result="$2"
+            if [ "$result" != "success" ]; then
+              echo "::error::$name ended with result: $result"
+              failures=$((failures + 1))
+            else
+              echo "$name: success"
+            fi
+          }
+
+          allow_skip_or_success() {
+            local name="$1"
+            local result="$2"
+            case "$result" in
+              success|skipped)
+                echo "$name: $result"
+                ;;
+              *)
+                echo "::error::$name ended with result: $result"
+                failures=$((failures + 1))
+                ;;
+            esac
+          }
+
+          require_success "change-policy" "${{ needs.change-policy.result }}"
+          allow_skip_or_success "desktop-checks" "${{ needs.desktop-checks.result }}"
+          allow_skip_or_success "server-checks" "${{ needs.server-checks.result }}"
+          allow_skip_or_success "adapter-checks" "${{ needs.adapter-checks.result }}"
+          allow_skip_or_success "desktop-native-checks" "${{ needs.desktop-native-checks.result }}"
+          allow_skip_or_success "docs-checks" "${{ needs.docs-checks.result }}"
+          allow_skip_or_success "coverage-checks" "${{ needs.coverage-checks.result }}"
+
+          if [ "$failures" -gt 0 ]; then
+            exit 1
+          fi

@@ -22,4 +22,14 @@ describe('PR quality workflow', () => {
     expect(workflow).toContain('path: artifacts/coverage/')
     expect(workflow).toContain('retention-days: 14')
   })
+
+  test('exposes a single required gate job for branch protection', () => {
+    const workflow = readFileSync('.github/workflows/pr-quality.yml', 'utf8')
+
+    expect(workflow).toContain('pr-quality-gate:')
+    expect(workflow).toContain('name: pr-quality-gate')
+    expect(workflow).toContain('if: always()')
+    expect(workflow).toContain('require_success "change-policy" "${{ needs.change-policy.result }}"')
+    expect(workflow).toContain('allow_skip_or_success "coverage-checks" "${{ needs.coverage-checks.result }}"')
+  })
 })

@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-import { evaluateThresholds, parseLcov } from './coverage'
+import {
+  evaluateChangedLineCoverage,
+  evaluateThresholds,
+  parseChangedLinesFromDiff,
+  parseLcov,
+} from './coverage'
 
 describe('coverage gate helpers', () => {
   test('parses lcov totals into percentages', () => {
@@ -24,6 +29,64 @@ describe('coverage gate helpers', () => {
     expect(summary.lines.pct).toBe(76.67)
     expect(summary.functions.pct).toBe(80)
     expect(summary.branches.pct).toBe(70)
+  })
+
+  test('filters lcov records to an explicit source scope', () => {
+    const summary = parseLcov([
+      'TN:',
+      'SF:/repo/src/server/routes.ts',
+      'LF:10',
+      'LH:8',
+      'FNF:2',
+      'FNH:2',
+      'end_of_record',
+      'SF:/repo/desktop/src-tauri/target/generated.js',
+      'LF:100',
+      'LH:0',
+      'FNF:10',
+      'FNH:0',
+      'end_of_record',
+    ].join('\n'), {
+      rootDir: '/repo',
+      scope: {
+        id: 'server-api',
+        title: 'Server/API',
+        includePrefixes: ['src/server/'],
+      },
+    })
+
+    expect(summary.lines.pct).toBe(80)
+    expect(summary.functions.pct).toBe(100)
+  })
+
+  test('evaluates changed executable line coverage', () => {
+    const changedLines = parseChangedLinesFromDiff([
+      'diff --git a/src/server/routes.ts b/src/server/routes.ts',
+      '--- a/src/server/routes.ts',
+      '+++ b/src/server/routes.ts',
+      '@@ -10,0 +11,2 @@',
+      '+const covered = true',
+      '+const uncovered = false',
+    ].join('\n'))
+
+    const failures = evaluateChangedLineCoverage(
+      changedLines,
+      new Map([
+        ['src/server/routes.ts', {
+          suiteId: 'server-api',
+          executableLines: new Set([11, 12]),
+          coveredLines: new Set([11]),
+        }],
+      ]),
+      [{
+        id: 'server-api',
+        title: 'Server/API',
+        includePrefixes: ['src/server/'],
+      }],
+      90,
+    ).failures
+
+    expect(failures).toEqual(['changed-lines: coverage 50% is below minimum 90%'])
   })
 
   test('reports minimum threshold failures', () => {

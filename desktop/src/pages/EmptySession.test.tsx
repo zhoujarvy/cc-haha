@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 
@@ -142,6 +142,7 @@ describe('EmptySession', () => {
   })
 
   afterEach(() => {
+    cleanup()
     useSessionStore.setState(initialSessionState, true)
     useChatStore.setState(initialChatState, true)
     useTabStore.setState(initialTabState, true)

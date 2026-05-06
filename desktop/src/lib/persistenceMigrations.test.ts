@@ -55,4 +55,44 @@ describe('desktop persistence migrations', () => {
     expect(window.localStorage.getItem('cc-haha-open-tabs')).toBeNull()
     expect(window.localStorage.getItem('cc-haha-theme')).toBeNull()
   })
+
+  test('does not throw if schema version persistence is blocked', () => {
+    const storage = {
+      getItem: window.localStorage.getItem.bind(window.localStorage),
+      removeItem: window.localStorage.removeItem.bind(window.localStorage),
+      setItem: (key: string, value: string) => {
+        if (key === DESKTOP_PERSISTENCE_VERSION_KEY) {
+          throw new Error('storage blocked')
+        }
+        window.localStorage.setItem(key, value)
+      },
+    }
+
+    expect(() => runDesktopPersistenceMigrations(storage)).not.toThrow()
+    expect(runDesktopPersistenceMigrations(storage).migratedKeys).toContain(DESKTOP_PERSISTENCE_VERSION_KEY)
+  })
+
+  test('does not throw if storage reads and writes are blocked', () => {
+    const storage = {
+      getItem: () => {
+        throw new Error('storage unavailable')
+      },
+      removeItem: () => {
+        throw new Error('storage unavailable')
+      },
+      setItem: () => {
+        throw new Error('storage unavailable')
+      },
+    }
+
+    const report = runDesktopPersistenceMigrations(storage)
+
+    expect(report.migratedKeys).toEqual(expect.arrayContaining([
+      'cc-haha-open-tabs',
+      'cc-haha-session-runtime',
+      'cc-haha-theme',
+      'cc-haha-locale',
+      DESKTOP_PERSISTENCE_VERSION_KEY,
+    ]))
+  })
 })

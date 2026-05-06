@@ -112,15 +112,39 @@ function normalizeEnumKey(
   }
 }
 
-export function runDesktopPersistenceMigrations(storage: StorageLike | null = globalThis.localStorage ?? null): DesktopMigrationReport {
+function runMigrationStep(
+  report: DesktopMigrationReport,
+  fallbackKey: string,
+  step: () => void,
+): void {
+  try {
+    step()
+  } catch {
+    report.migratedKeys.push(fallbackKey)
+  }
+}
+
+function getDefaultStorage(): StorageLike | null {
+  try {
+    return globalThis.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+export function runDesktopPersistenceMigrations(storage: StorageLike | null = getDefaultStorage()): DesktopMigrationReport {
   const report: DesktopMigrationReport = { migratedKeys: [] }
   if (!storage) return report
 
-  migrateTabs(storage, report)
-  migrateSessionRuntime(storage, report)
-  normalizeEnumKey(storage, THEME_STORAGE_KEY, ['light', 'dark'], report)
-  normalizeEnumKey(storage, LOCALE_STORAGE_KEY, ['zh', 'en'], report)
-  storage.setItem(DESKTOP_PERSISTENCE_VERSION_KEY, String(CURRENT_DESKTOP_PERSISTENCE_SCHEMA_VERSION))
+  runMigrationStep(report, TAB_STORAGE_KEY, () => migrateTabs(storage, report))
+  runMigrationStep(report, SESSION_RUNTIME_STORAGE_KEY, () => migrateSessionRuntime(storage, report))
+  runMigrationStep(report, THEME_STORAGE_KEY, () => normalizeEnumKey(storage, THEME_STORAGE_KEY, ['light', 'dark'], report))
+  runMigrationStep(report, LOCALE_STORAGE_KEY, () => normalizeEnumKey(storage, LOCALE_STORAGE_KEY, ['zh', 'en'], report))
+  try {
+    storage.setItem(DESKTOP_PERSISTENCE_VERSION_KEY, String(CURRENT_DESKTOP_PERSISTENCE_SCHEMA_VERSION))
+  } catch {
+    report.migratedKeys.push(DESKTOP_PERSISTENCE_VERSION_KEY)
+  }
 
   return report
 }

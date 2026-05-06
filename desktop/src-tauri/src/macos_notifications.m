@@ -5,8 +5,21 @@
 #include <stdint.h>
 #include <string.h>
 
+typedef void (*CCHHNotificationResponseCallback)(const char *target_json);
+
 @interface CCHHNotificationDelegate : NSObject <UNUserNotificationCenterDelegate>
 @end
+
+static CCHHNotificationResponseCallback cchhNotificationResponseCallback = NULL;
+
+static void cchh_emit_notification_response(NSString *target) {
+    if (cchhNotificationResponseCallback == NULL) {
+        return;
+    }
+
+    const char *targetJson = target != nil ? [target UTF8String] : NULL;
+    cchhNotificationResponseCallback(targetJson);
+}
 
 @implementation CCHHNotificationDelegate
 - (void)userNotificationCenter:(UNUserNotificationCenter *)center
@@ -18,6 +31,14 @@
         completionHandler(UNNotificationPresentationOptionAlert | UNNotificationPresentationOptionSound);
     }
 }
+
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+didReceiveNotificationResponse:(UNNotificationResponse *)response
+         withCompletionHandler:(void (^)(void))completionHandler {
+    NSString *target = response.notification.request.content.userInfo[@"cchh_target"];
+    cchh_emit_notification_response(target);
+    completionHandler();
+}
 @end
 
 @interface CCHHUserNotificationDelegate : NSObject <NSUserNotificationCenterDelegate>
@@ -26,6 +47,11 @@
 @implementation CCHHUserNotificationDelegate
 - (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification {
     return YES;
+}
+
+- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification {
+    NSString *target = notification.userInfo[@"cchh_target"];
+    cchh_emit_notification_response(target);
 }
 @end
 
@@ -50,6 +76,10 @@ static void cchh_copy_error(char *buffer, uintptr_t buffer_len, NSString *messag
     size_t max_len = (size_t)buffer_len - 1;
     strncpy(buffer, utf8, max_len);
     buffer[max_len] = '\0';
+}
+
+void cchh_set_notification_response_callback(CCHHNotificationResponseCallback callback) {
+    cchhNotificationResponseCallback = callback;
 }
 
 static UNUserNotificationCenter *cchh_notification_center(void) {
@@ -136,7 +166,7 @@ bool cchh_request_notification_authorization(char *error_buffer, uintptr_t error
     }
 }
 
-bool cchh_send_user_notification(const char *title, const char *body, char *error_buffer, uintptr_t error_buffer_len) {
+bool cchh_send_user_notification(const char *title, const char *body, const char *target, char *error_buffer, uintptr_t error_buffer_len) {
     @autoreleasepool {
         cchh_copy_error(error_buffer, error_buffer_len, nil);
 
@@ -154,6 +184,9 @@ bool cchh_send_user_notification(const char *title, const char *body, char *erro
             content.title = title != NULL ? [NSString stringWithUTF8String:title] : @"Claude Code Haha";
             if (body != NULL && strlen(body) > 0) {
                 content.body = [NSString stringWithUTF8String:body];
+            }
+            if (target != NULL && strlen(target) > 0) {
+                content.userInfo = @{ @"cchh_target": [NSString stringWithUTF8String:target] };
             }
             content.sound = [UNNotificationSound defaultSound];
 
@@ -184,6 +217,9 @@ bool cchh_send_user_notification(const char *title, const char *body, char *erro
         notification.title = title != NULL ? [NSString stringWithUTF8String:title] : @"Claude Code Haha";
         if (body != NULL && strlen(body) > 0) {
             notification.informativeText = [NSString stringWithUTF8String:body];
+        }
+        if (target != NULL && strlen(target) > 0) {
+            notification.userInfo = @{ @"cchh_target": [NSString stringWithUTF8String:target] };
         }
         notification.soundName = NSUserNotificationDefaultSoundName;
 

@@ -9,16 +9,32 @@ export type DesktopNotificationOptions = {
   cooldownScope?: string
   cooldownMs?: number
   requestAttention?: boolean
+  target?: DesktopNotificationTarget
 }
 
-type NativeNotificationSender = (options: { title: string; body?: string }) => Promise<boolean> | boolean
+export type DesktopNotificationTarget =
+  | { type: 'session'; sessionId: string; title?: string }
+  | { type: 'scheduled' }
+
+type NativeNotificationPayload = {
+  title: string
+  body?: string
+  id?: number
+  extra?: Record<string, unknown>
+  target?: DesktopNotificationTarget
+}
+
+type NativeNotificationSender = (options: NativeNotificationPayload) => Promise<boolean> | boolean
 export type DesktopNotificationPermission = NotificationPermission | 'unsupported'
 
+const TARGET_EXTRA_KEY = 'ccHahaTarget'
 const notifiedKeys = new Set<string>()
 const pendingKeys = new Set<string>()
 const lastNotificationAtByScope = new Map<string, number>()
 const pendingCooldownScopes = new Set<string>()
+const notificationTargetById = new Map<number, DesktopNotificationTarget>()
 let overrideNativeNotificationSender: NativeNotificationSender | null = null
+let nextNotificationId = 1
 
 function readBrowserNotificationPermission(): DesktopNotificationPermission {
   if (typeof window === 'undefined' || !('Notification' in window)) {
@@ -78,12 +94,86 @@ async function invokeMacNotificationPermissionRequest(): Promise<DesktopNotifica
   }
 }
 
-async function sendMacNotification(options: { title: string; body?: string }): Promise<boolean | null> {
+function isNotificationTarget(value: unknown): value is DesktopNotificationTarget {
+  if (!value || typeof value !== 'object') return false
+  const target = value as Partial<DesktopNotificationTarget>
+  if (target.type === 'scheduled') return true
+  if (target.type === 'session') {
+    return typeof target.sessionId === 'string' && target.sessionId.length > 0 &&
+      (target.title === undefined || typeof target.title === 'string')
+  }
+  return false
+}
+
+function parseTargetJson(value: unknown): DesktopNotificationTarget | null {
+  if (typeof value !== 'string' || !value.trim()) return null
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return isNotificationTarget(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function notificationTargetFromPayload(payload: unknown): DesktopNotificationTarget | null {
+  if (isNotificationTarget(payload)) return payload
+  const jsonTarget = parseTargetJson(payload)
+  if (jsonTarget) return jsonTarget
+
+  if (!payload || typeof payload !== 'object') return null
+  const record = payload as Record<string, unknown>
+
+  const directTarget = notificationTargetFromPayload(record.target)
+  if (directTarget) return directTarget
+
+  const extra = record.extra && typeof record.extra === 'object'
+    ? record.extra as Record<string, unknown>
+    : null
+  const extraTarget = extra ? notificationTargetFromPayload(extra[TARGET_EXTRA_KEY]) : null
+  if (extraTarget) return extraTarget
+
+  const data = record.data && typeof record.data === 'object'
+    ? record.data as Record<string, unknown>
+    : null
+  const dataTarget = data ? notificationTargetFromPayload(data[TARGET_EXTRA_KEY]) : null
+  if (dataTarget) return dataTarget
+
+  const id = typeof record.id === 'number' ? record.id : null
+  return id !== null ? notificationTargetById.get(id) ?? null : null
+}
+
+function buildNativeNotificationPayload(options: {
+  title: string
+  body?: string
+  target?: DesktopNotificationTarget
+}): NativeNotificationPayload {
+  const payload: NativeNotificationPayload = {
+    title: options.title,
+    body: options.body,
+  }
+
+  if (options.target) {
+    const id = nextNotificationId++
+    notificationTargetById.set(id, options.target)
+    payload.id = id
+    payload.extra = { [TARGET_EXTRA_KEY]: JSON.stringify(options.target) }
+    payload.target = options.target
+  }
+
+  return payload
+}
+
+async function sendMacNotification(options: { title: string; body?: string; target?: DesktopNotificationTarget }): Promise<boolean | null> {
   if (detectPlatform() !== 'darwin') return null
 
   try {
     const { invoke } = await import('@tauri-apps/api/core')
-    const sent = await invoke<boolean>('macos_send_notification', options)
+    const target = options.target ? JSON.stringify(options.target) : undefined
+    const sent = await invoke<boolean>('macos_send_notification', {
+      title: options.title,
+      body: options.body,
+      ...(target ? { target } : {}),
+    })
     return typeof sent === 'boolean' ? sent : false
   } catch (err) {
     if (typeof console !== 'undefined') {
@@ -141,7 +231,7 @@ export async function openDesktopNotificationSettings(): Promise<boolean> {
   }
 }
 
-async function sendNativeNotification(options: { title: string; body?: string }): Promise<boolean> {
+async function sendNativeNotification(options: { title: string; body?: string; target?: DesktopNotificationTarget }): Promise<boolean> {
   const macSent = await sendMacNotification(options)
   if (macSent !== null) return macSent
 
@@ -154,7 +244,8 @@ async function sendNativeNotification(options: { title: string; body?: string })
     return false
   }
 
-  sendNotification(options)
+  const payload = buildNativeNotificationPayload(options)
+  sendNotification(payload)
   return true
 }
 
@@ -165,6 +256,66 @@ async function requestWindowAttention(): Promise<boolean> {
     return true
   } catch {
     return false
+  }
+}
+
+async function focusCurrentWindow(): Promise<void> {
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const win = getCurrentWindow()
+    await (win as unknown as { show?: () => Promise<void> | void }).show?.()
+    await (win as unknown as { setFocus?: () => Promise<void> | void }).setFocus?.()
+  } catch {
+    // Best effort only: the notification target can still be opened in the UI.
+  }
+}
+
+function disposePluginListener(listener: unknown): void {
+  if (typeof listener === 'function') {
+    listener()
+    return
+  }
+  const unregister = listener && typeof listener === 'object'
+    ? (listener as { unregister?: () => Promise<void> | void }).unregister
+    : undefined
+  if (unregister) void unregister()
+}
+
+export async function installDesktopNotificationClickListener(
+  onTarget: (target: DesktopNotificationTarget) => void,
+): Promise<() => void> {
+  const cleanups: Array<() => void> = []
+  const handlePayload = (payload: unknown) => {
+    const target = notificationTargetFromPayload(payload)
+    if (!target) return
+    void focusCurrentWindow()
+    onTarget(target)
+  }
+
+  try {
+    const { listen } = await import('@tauri-apps/api/event')
+    const unlisten = await listen<unknown>('desktop-notification-clicked', (event) => {
+      handlePayload(event.payload)
+    })
+    cleanups.push(unlisten)
+  } catch {
+    // Non-Tauri browser tests and unsupported runtimes do not expose native events.
+  }
+
+  try {
+    const { onAction } = await import('@tauri-apps/plugin-notification') as {
+      onAction?: (cb: (notification: unknown) => void) => Promise<unknown>
+    }
+    if (onAction) {
+      const listener = await onAction(handlePayload)
+      cleanups.push(() => disposePluginListener(listener))
+    }
+  } catch {
+    // The desktop plugin does not expose click actions on every platform.
+  }
+
+  return () => {
+    for (const cleanup of cleanups.splice(0)) cleanup()
   }
 }
 
@@ -197,7 +348,11 @@ export async function notifyDesktop(options: DesktopNotificationOptions): Promis
 
   const sender = overrideNativeNotificationSender ?? sendNativeNotification
   try {
-    const sent = await Promise.resolve(sender({ title: options.title, body: options.body }))
+    const sent = await Promise.resolve(sender({
+      title: options.title,
+      body: options.body,
+      ...(options.target ? { target: options.target } : {}),
+    }))
     if (options.dedupeKey) {
       pendingKeys.delete(options.dedupeKey)
       if (sent) notifiedKeys.add(options.dedupeKey)
@@ -225,7 +380,9 @@ export function resetDesktopNotificationsForTests(): void {
   pendingKeys.clear()
   lastNotificationAtByScope.clear()
   pendingCooldownScopes.clear()
+  notificationTargetById.clear()
   overrideNativeNotificationSender = null
+  nextNotificationId = 1
 }
 
 export function setNativeNotificationSenderForTests(sender: NativeNotificationSender | null): void {

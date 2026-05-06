@@ -699,6 +699,7 @@ describe('chatStore history mapping', () => {
       requestAttention: true,
       title: 'Claude Code Haha 需要你的确认',
       body: 'AskUserQuestion 请求执行，正在等待允许。',
+      target: { type: 'session', sessionId: TEST_SESSION_ID },
     })
   })
 
@@ -1013,6 +1014,7 @@ describe('chatStore history mapping', () => {
       requestAttention: true,
       title: 'Claude Code Haha 需要你的确认',
       body: 'Open Finder and inspect a file',
+      target: { type: 'session', sessionId: TEST_SESSION_ID },
     })
   })
 
@@ -1189,6 +1191,7 @@ describe('chatStore history mapping', () => {
       cooldownScope: 'agent-completion',
       title: 'Claude Code Haha 已完成回复',
       body: '结果 修复完成 bun test 已通过',
+      target: { type: 'session', sessionId: TEST_SESSION_ID },
     }))
     expect(notifyDesktopMock.mock.calls[0]?.[0].dedupeKey).toMatch(
       /^agent-completion:test-session-1:msg-/,

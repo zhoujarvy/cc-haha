@@ -31,6 +31,10 @@ use tauri_plugin_shell::{
 mod macos_notifications {
     use std::ffi::{CStr, CString};
     use std::os::raw::{c_char, c_int};
+    use std::sync::{Mutex, OnceLock};
+
+    use serde::Serialize;
+    use tauri::{AppHandle, Emitter};
 
     const ERROR_BUFFER_LEN: usize = 1024;
 
@@ -46,10 +50,22 @@ mod macos_notifications {
         fn cchh_send_user_notification(
             title: *const c_char,
             body: *const c_char,
+            target: *const c_char,
             error_buffer: *mut c_char,
             error_buffer_len: usize,
         ) -> bool;
+        fn cchh_set_notification_response_callback(
+            callback: Option<extern "C" fn(*const c_char)>,
+        );
     }
+
+    #[derive(Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct NotificationClickPayload {
+        target: Option<String>,
+    }
+
+    static NOTIFICATION_APP_HANDLE: OnceLock<Mutex<Option<AppHandle>>> = OnceLock::new();
 
     fn new_error_buffer() -> [c_char; ERROR_BUFFER_LEN] {
         [0; ERROR_BUFFER_LEN]
@@ -106,19 +122,59 @@ mod macos_notifications {
         permission_state()
     }
 
-    pub fn send_notification(title: String, body: Option<String>) -> Result<bool, String> {
+    extern "C" fn handle_notification_response(target: *const c_char) {
+        let target = if target.is_null() {
+            None
+        } else {
+            let value = unsafe { CStr::from_ptr(target) }
+                .to_string_lossy()
+                .trim()
+                .to_string();
+            (!value.is_empty()).then_some(value)
+        };
+
+        let Some(app) = NOTIFICATION_APP_HANDLE
+            .get()
+            .and_then(|handle| handle.lock().ok().and_then(|guard| guard.clone()))
+        else {
+            return;
+        };
+
+        super::show_main_window(&app);
+        let _ = app.emit("desktop-notification-clicked", NotificationClickPayload { target });
+    }
+
+    pub fn install_click_handler(app: AppHandle) {
+        let handle = NOTIFICATION_APP_HANDLE.get_or_init(|| Mutex::new(None));
+        if let Ok(mut guard) = handle.lock() {
+            *guard = Some(app);
+        }
+        unsafe { cchh_set_notification_response_callback(Some(handle_notification_response)) };
+    }
+
+    pub fn send_notification(
+        title: String,
+        body: Option<String>,
+        target: Option<String>,
+    ) -> Result<bool, String> {
         let title = CString::new(title)
             .map_err(|_| "notification title contains an unsupported NUL byte".to_string())?;
         let body = body
             .map(CString::new)
             .transpose()
             .map_err(|_| "notification body contains an unsupported NUL byte".to_string())?;
+        let target = target
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| "notification target contains an unsupported NUL byte".to_string())?;
 
         let mut error_buffer = new_error_buffer();
         let sent = unsafe {
             cchh_send_user_notification(
                 title.as_ptr(),
                 body.as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+                target.as_ref()
                     .map_or(std::ptr::null(), |value| value.as_ptr()),
                 error_buffer.as_mut_ptr(),
                 ERROR_BUFFER_LEN,
@@ -138,6 +194,8 @@ mod macos_notifications {
 
 #[cfg(not(target_os = "macos"))]
 mod macos_notifications {
+    use tauri::AppHandle;
+
     pub fn permission_state() -> Result<String, String> {
         Ok("unsupported".to_string())
     }
@@ -146,7 +204,13 @@ mod macos_notifications {
         Ok("unsupported".to_string())
     }
 
-    pub fn send_notification(_title: String, _body: Option<String>) -> Result<bool, String> {
+    pub fn install_click_handler(_app: AppHandle) {}
+
+    pub fn send_notification(
+        _title: String,
+        _body: Option<String>,
+        _target: Option<String>,
+    ) -> Result<bool, String> {
         Ok(false)
     }
 }
@@ -741,8 +805,12 @@ fn macos_request_notification_permission() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn macos_send_notification(title: String, body: Option<String>) -> Result<bool, String> {
-    macos_notifications::send_notification(title, body)
+fn macos_send_notification(
+    title: String,
+    body: Option<String>,
+    target: Option<String>,
+) -> Result<bool, String> {
+    macos_notifications::send_notification(title, body, target)
 }
 
 fn decode_terminal_output(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
@@ -1487,6 +1555,7 @@ pub fn run() {
     let app = builder
         .setup(|app| {
             setup_system_tray(app)?;
+            macos_notifications::install_click_handler(app.handle().clone());
             restore_main_window_state(&app.handle());
 
             let state = app.state::<ServerState>();

@@ -708,6 +708,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           body: msg.toolName
             ? `${msg.toolName} 请求执行，正在等待允许。`
             : '有一个工具请求正在等待允许。',
+          target: { type: 'session', sessionId },
         })
         update((s) => ({
           pendingPermission: {
@@ -743,6 +744,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           requestAttention: true,
           title: 'Claude Code Haha 需要你的确认',
           body: msg.request.reason || 'Computer Use 正在等待允许。',
+          target: { type: 'session', sessionId },
         })
         update(() => ({
           pendingComputerUsePermission: {
@@ -788,6 +790,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             cooldownScope: 'agent-completion',
             title: notification.title,
             body: notification.body,
+            target: { type: 'session', sessionId },
           })
         }
         break

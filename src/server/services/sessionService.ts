@@ -19,6 +19,10 @@ import {
   getModelMaxOutputTokens,
 } from '../../utils/context.js'
 import { getCanonicalName } from '../../utils/model/model.js'
+import {
+  prepareSessionWorkspace,
+  type CreateSessionRepositoryOptions,
+} from './repositoryLaunchService.js'
 
 // ============================================================================
 // Types
@@ -1197,33 +1201,32 @@ export class SessionService {
   /**
    * Create a new session file for the given working directory.
    */
-  async createSession(workDir?: string): Promise<{ sessionId: string }> {
+  async createSession(
+    workDir?: string,
+    repositoryOptions?: CreateSessionRepositoryOptions,
+  ): Promise<{ sessionId: string; workDir: string }> {
     // Default to user home directory when no workDir specified
     const resolvedWorkDir = workDir || os.homedir()
+    const sessionId = crypto.randomUUID()
 
     // Resolve to absolute path. NOTE: path.resolve() uses process.cwd() to
     // expand relative paths — in bundled sidecar mode the server's cwd is
     // typically '/'. Callers (IM adapters) already send absolute realPath,
     // but we log here so cwd regressions are caught early.
-    const resolvedPath = path.resolve(resolvedWorkDir)
-    let absWorkDir: string
-    try {
-      absWorkDir = await fs.realpath(resolvedPath)
-    } catch {
-      throw ApiError.badRequest(`Working directory does not exist: ${resolvedPath}`)
-    }
+    const preparedWorkspace = await prepareSessionWorkspace(
+      resolvedWorkDir,
+      repositoryOptions,
+      sessionId,
+    )
+    const absWorkDir = preparedWorkspace.workDir
     console.log(
       `[SessionService] createSession: requested workDir=${JSON.stringify(
         workDir,
-      )}, resolved=${absWorkDir} (process.cwd()=${process.cwd()})`,
+      )}, resolved=${absWorkDir}, repository=${JSON.stringify(
+        preparedWorkspace.repository ?? null,
+      )} (process.cwd()=${process.cwd()})`,
     )
-    let stat
-    stat = await fs.stat(absWorkDir)
-    if (!stat.isDirectory()) {
-      throw ApiError.badRequest(`Working directory is not a directory: ${absWorkDir}`)
-    }
 
-    const sessionId = crypto.randomUUID()
     const sanitized = this.sanitizePath(absWorkDir)
     const dirPath = path.join(this.getProjectsDir(), sanitized)
 
@@ -1250,12 +1253,13 @@ export class SessionService {
       type: 'session-meta',
       isMeta: true,
       workDir: absWorkDir,
+      repository: preparedWorkspace.repository,
       timestamp: now,
     }
 
     await fs.writeFile(filePath, JSON.stringify(initialEntry) + '\n' + JSON.stringify(metaEntry) + '\n', 'utf-8')
 
-    return { sessionId }
+    return { sessionId, workDir: absWorkDir }
   }
 
   /**

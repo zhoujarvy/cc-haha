@@ -15,9 +15,17 @@ type DirEntry = { name: string; path: string; isDirectory: boolean }
 let cachedProjects: RecentProject[] | null = null
 let cacheTimestamp = 0
 const CACHE_TTL = 30_000 // 30s
+const DESKTOP_WORKTREE_MARKER = '/.claude/worktrees/'
 
 function isTauriRuntime() {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+}
+
+function projectNameFromPath(filePath: string) {
+  const displayRoot = filePath.includes(DESKTOP_WORKTREE_MARKER)
+    ? filePath.slice(0, filePath.indexOf(DESKTOP_WORKTREE_MARKER))
+    : filePath
+  return displayRoot.split('/').filter(Boolean).pop() || filePath
 }
 
 export function DirectoryPicker({ value, onChange }: Props) {
@@ -154,7 +162,7 @@ export function DirectoryPicker({ value, onChange }: Props) {
             <span className="material-symbols-outlined text-[14px] text-[var(--color-text-secondary)]">folder</span>
           )}
           <span className="font-medium text-[var(--color-text-primary)]">
-            {selectedProject?.repoName || selectedProject?.projectName || value.split('/').pop()}
+            {selectedProject?.repoName || selectedProject?.projectName || projectNameFromPath(value)}
           </span>
           {selectedProject?.branch && (
             <>

@@ -58,6 +58,42 @@ describe('sessionStore', () => {
       workDir: 'D:/workspace/code/myself_code/cc-haha',
       workDirExists: true,
     })
+    expect(createMock).toHaveBeenCalledWith({
+      workDir: 'D:/workspace/code/myself_code/cc-haha',
+    })
     expect(listMock).toHaveBeenCalledOnce()
+  })
+
+  it('forwards direct branch switch repository options when creating a session', async () => {
+    createMock.mockResolvedValue({ sessionId: 'session-branch-switch', workDir: '/workspace/repo' })
+    listMock.mockResolvedValue({ sessions: [], total: 0 })
+
+    await useSessionStore.getState().createSession('/workspace/repo', {
+      repository: { branch: 'feature/rail', worktree: false },
+    })
+
+    expect(createMock).toHaveBeenCalledWith({
+      workDir: '/workspace/repo',
+      repository: { branch: 'feature/rail', worktree: false },
+    })
+  })
+
+  it('forwards isolated worktree repository options when creating a session', async () => {
+    createMock.mockResolvedValue({
+      sessionId: 'session-worktree-launch',
+      workDir: '/workspace/repo/.claude/worktrees/desktop-feature-rail-12345678',
+    })
+    listMock.mockImplementation(() => new Promise(() => {}))
+
+    await useSessionStore.getState().createSession('/workspace/repo', {
+      repository: { branch: 'feature/rail', worktree: true },
+    })
+
+    expect(createMock).toHaveBeenCalledWith({
+      workDir: '/workspace/repo',
+      repository: { branch: 'feature/rail', worktree: true },
+    })
+    expect(useSessionStore.getState().sessions[0]?.workDir)
+      .toBe('/workspace/repo/.claude/worktrees/desktop-feature-rail-12345678')
   })
 })

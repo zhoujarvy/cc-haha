@@ -1,7 +1,11 @@
 import { create } from 'zustand'
-import { sessionsApi } from '../api/sessions'
+import { sessionsApi, type CreateSessionRepositoryOptions } from '../api/sessions'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import type { SessionListItem } from '../types/session'
+
+type CreateSessionOptions = {
+  repository?: CreateSessionRepositoryOptions
+}
 
 type SessionStore = {
   sessions: SessionListItem[]
@@ -12,7 +16,7 @@ type SessionStore = {
   availableProjects: string[]
 
   fetchSessions: (project?: string) => Promise<void>
-  createSession: (workDir?: string) => Promise<string>
+  createSession: (workDir?: string, options?: CreateSessionOptions) => Promise<string>
   deleteSession: (id: string) => Promise<void>
   renameSession: (id: string, title: string) => Promise<void>
   updateSessionTitle: (id: string, title: string) => void
@@ -48,8 +52,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }
   },
 
-  createSession: async (workDir?: string) => {
-    const { sessionId: id } = await sessionsApi.create(workDir || undefined)
+  createSession: async (workDir?: string, options?: CreateSessionOptions) => {
+    const { sessionId: id, workDir: resolvedWorkDir } = await sessionsApi.create({
+      ...(workDir ? { workDir } : {}),
+      ...(options?.repository ? { repository: options.repository } : {}),
+    })
     const now = new Date().toISOString()
     const optimisticSession: SessionListItem = {
       id,
@@ -58,7 +65,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       modifiedAt: now,
       messageCount: 0,
       projectPath: '',
-      workDir: workDir ?? null,
+      workDir: resolvedWorkDir ?? workDir ?? null,
       workDirExists: true,
     }
 

@@ -22,6 +22,10 @@ import { getCommandName } from '../../commands.js'
 import { getSkillDirCommands } from '../../skills/loadSkillsDir.js'
 import { WorkspaceService } from '../services/workspaceService.js'
 import {
+  getRepositoryContext,
+  type CreateSessionRepositoryOptions,
+} from '../services/repositoryLaunchService.js'
+import {
   executeSessionRewind,
   getSessionTurnCheckpointDiff,
   listSessionTurnCheckpoints,
@@ -68,6 +72,11 @@ export async function handleSessionsApi(
     // Special collection route: /api/sessions/recent-projects
     if (sessionId === 'recent-projects' && req.method === 'GET') {
       return await getRecentProjects(url)
+    }
+
+    // Special collection route: /api/sessions/repository-context
+    if (sessionId === 'repository-context' && req.method === 'GET') {
+      return await getSessionRepositoryContext(url)
     }
 
     // -----------------------------------------------------------------------
@@ -244,9 +253,9 @@ async function handleSessionWorkspaceRoute(
 }
 
 async function createSession(req: Request): Promise<Response> {
-  let body: { workDir?: string }
+  let body: { workDir?: string; repository?: CreateSessionRepositoryOptions }
   try {
-    body = (await req.json()) as { workDir?: string }
+    body = (await req.json()) as { workDir?: string; repository?: CreateSessionRepositoryOptions }
   } catch {
     throw ApiError.badRequest('Invalid JSON body')
   }
@@ -255,8 +264,30 @@ async function createSession(req: Request): Promise<Response> {
     throw ApiError.badRequest('workDir must be a string')
   }
 
-  const result = await sessionService.createSession(body.workDir)
+  if (body.repository !== undefined) {
+    if (!body.repository || typeof body.repository !== 'object' || Array.isArray(body.repository)) {
+      throw ApiError.badRequest('repository must be an object')
+    }
+    if (body.repository.branch !== undefined && body.repository.branch !== null && typeof body.repository.branch !== 'string') {
+      throw ApiError.badRequest('repository.branch must be a string')
+    }
+    if (body.repository.worktree !== undefined && typeof body.repository.worktree !== 'boolean') {
+      throw ApiError.badRequest('repository.worktree must be a boolean')
+    }
+  }
+
+  const result = await sessionService.createSession(body.workDir, body.repository)
+  recentProjectsCache = null
   return Response.json(result, { status: 201 })
+}
+
+async function getSessionRepositoryContext(url: URL): Promise<Response> {
+  const workDir = url.searchParams.get('workDir')
+  if (!workDir) {
+    throw ApiError.badRequest('workDir query parameter is required')
+  }
+
+  return Response.json(await getRepositoryContext(workDir))
 }
 
 async function requireSessionWorkspace(sessionId: string): Promise<string> {
@@ -640,6 +671,18 @@ type RecentProjectEntry = {
 // In-memory cache for recent projects (TTL: 30s)
 let recentProjectsCache: { projects: RecentProjectEntry[]; timestamp: number } | null = null
 const RECENT_PROJECTS_CACHE_TTL = 30_000
+const DESKTOP_WORKTREE_MARKER = '/.claude/worktrees/'
+
+function projectNameForRecentPath(realPath: string, fallback: string): string {
+  const displayRoot = realPath.includes(DESKTOP_WORKTREE_MARKER)
+    ? realPath.slice(0, realPath.indexOf(DESKTOP_WORKTREE_MARKER))
+    : realPath
+  return displayRoot.split('/').filter(Boolean).pop() || fallback
+}
+
+function isDesktopWorktreeBranchName(branch: string | null): boolean {
+  return !!branch && branch.startsWith('worktree-desktop-')
+}
 
 async function getRecentProjects(url: URL): Promise<Response> {
   const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '10', 10) || 10, 1), 500)
@@ -680,7 +723,7 @@ async function getRecentProjects(url: URL): Promise<Response> {
   const entries = Array.from(realPathMap.entries())
   const projects = await Promise.all(
     entries.map(async ([realPath, info]) => {
-      const projectName = realPath.split('/').filter(Boolean).pop() || info.projectPath
+      const projectName = projectNameForRecentPath(realPath, info.projectPath)
 
       let isGit = false
       let repoName: string | null = null
@@ -712,7 +755,7 @@ async function getRecentProjects(url: URL): Promise<Response> {
               } catch { return null }
             })(),
           ])
-          branch = branchResult
+          branch = isDesktopWorktreeBranchName(branchResult) ? null : branchResult
           repoName = remoteResult
         }
       } catch { /* not a git repo or dir doesn't exist */ }

@@ -1,0 +1,402 @@
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import {
+  AlertCircle,
+  Check,
+  ChevronDown,
+  GitBranch,
+  GitFork,
+  Loader2,
+  Search,
+} from 'lucide-react'
+import {
+  sessionsApi,
+  type RepositoryBranchInfo,
+  type RepositoryContextResult,
+} from '../../api/sessions'
+import { useTranslation } from '../../i18n'
+import { DirectoryPicker } from './DirectoryPicker'
+
+type Props = {
+  workDir: string
+  onWorkDirChange: (path: string) => void
+  branch: string | null
+  onBranchChange: (branch: string | null) => void
+  useWorktree: boolean
+  onUseWorktreeChange: (enabled: boolean) => void
+  onLaunchReadyChange?: (ready: boolean) => void
+  disabled?: boolean
+}
+
+const BRANCH_MENU_HEIGHT = 360
+const BRANCH_MENU_WIDTH = 390
+const VIEWPORT_GUTTER = 12
+
+function stateMessage(context: RepositoryContextResult | null, error: string | null) {
+  if (error) return error
+  if (!context) return null
+  if (context.state === 'not_git_repo') return 'not_git'
+  if (context.state === 'missing_workdir') return 'missing'
+  if (context.state === 'error') return context.error || 'error'
+  return null
+}
+
+export function RepositoryLaunchControls({
+  workDir,
+  onWorkDirChange,
+  branch,
+  onBranchChange,
+  useWorktree,
+  onUseWorktreeChange,
+  onLaunchReadyChange,
+  disabled = false,
+}: Props) {
+  const t = useTranslation()
+  const [context, setContext] = useState<RepositoryContextResult | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false)
+  const [branchFilter, setBranchFilter] = useState('')
+  const [selectedIndex, setSelectedIndex] = useState(0)
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number; direction: 'up' | 'down' } | null>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const branchButtonRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const searchInputId = useId()
+  const listboxId = useId()
+
+  const updateMenuPos = useCallback(() => {
+    if (!branchButtonRef.current) return
+    const rect = branchButtonRef.current.getBoundingClientRect()
+    const spaceAbove = rect.top
+    const spaceBelow = window.innerHeight - rect.bottom
+    const direction = spaceBelow >= BRANCH_MENU_HEIGHT || spaceBelow >= spaceAbove ? 'down' : 'up'
+    const maxLeft = Math.max(VIEWPORT_GUTTER, window.innerWidth - BRANCH_MENU_WIDTH - VIEWPORT_GUTTER)
+    setMenuPos({
+      top: direction === 'down' ? rect.bottom + 6 : rect.top - 6,
+      left: Math.min(Math.max(rect.left, VIEWPORT_GUTTER), maxLeft),
+      direction,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!workDir) {
+      setContext(null)
+      setError(null)
+      setLoading(false)
+      onBranchChange(null)
+      return
+    }
+
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    sessionsApi.getRepositoryContext(workDir)
+      .then((result) => {
+        if (cancelled) return
+        setContext(result)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setContext(null)
+        setError(err instanceof Error ? err.message : String(err))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [workDir, onBranchChange])
+
+  useEffect(() => {
+    if (context?.state !== 'ok') {
+      if (context && branch !== null) onBranchChange(null)
+      return
+    }
+
+    const branchExists = branch && context.branches.some((candidate) => candidate.name === branch)
+    if (branchExists) return
+
+    const fallbackBranch = [
+      context.currentBranch,
+      context.defaultBranch,
+      context.branches[0]?.name,
+    ].find((name) => name && context.branches.some((candidate) => candidate.name === name))
+
+    onBranchChange(fallbackBranch || null)
+  }, [branch, context, onBranchChange])
+
+  useEffect(() => {
+    if (!branchMenuOpen) return
+    const handleClick = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (rootRef.current?.contains(target)) return
+      if (menuRef.current?.contains(target)) return
+      setBranchMenuOpen(false)
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      setBranchMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handleClick)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handleClick)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [branchMenuOpen])
+
+  useEffect(() => {
+    if (!branchMenuOpen) return
+    updateMenuPos()
+    window.addEventListener('scroll', updateMenuPos, true)
+    window.addEventListener('resize', updateMenuPos)
+    requestAnimationFrame(() => searchRef.current?.focus())
+    return () => {
+      window.removeEventListener('scroll', updateMenuPos, true)
+      window.removeEventListener('resize', updateMenuPos)
+    }
+  }, [branchMenuOpen, updateMenuPos])
+
+  useEffect(() => {
+    setSelectedIndex(0)
+  }, [branchFilter])
+
+  useEffect(() => {
+    const activeItem = branchMenuOpen ? itemRefs.current[selectedIndex] : null
+    activeItem?.scrollIntoView({ block: 'nearest' })
+  }, [branchMenuOpen, selectedIndex])
+
+  const selectedBranch = useMemo(() => {
+    if (context?.state !== 'ok') return null
+    return context.branches.find((candidate) => candidate.name === branch) ?? null
+  }, [branch, context])
+
+  const filteredBranches = useMemo(() => {
+    if (context?.state !== 'ok') return []
+    const query = branchFilter.trim().toLowerCase()
+    if (!query) return context.branches
+    return context.branches.filter((candidate) => (
+      candidate.name.toLowerCase().includes(query) ||
+      candidate.remoteRef?.toLowerCase().includes(query) ||
+      candidate.worktreePath?.toLowerCase().includes(query)
+    ))
+  }, [branchFilter, context])
+
+  const warningMessage = useMemo(() => {
+    if (context?.state !== 'ok' || !selectedBranch || useWorktree) return null
+    if (selectedBranch.name !== context.currentBranch && context.dirty) {
+      return t('repoLaunch.dirtyWarning')
+    }
+    if (selectedBranch.name !== context.currentBranch && selectedBranch.checkedOut) {
+      return t('repoLaunch.checkedOutWarning')
+    }
+    return null
+  }, [context, selectedBranch, t, useWorktree])
+
+  const selectBranch = (candidate: RepositoryBranchInfo) => {
+    onBranchChange(candidate.name)
+    setBranchMenuOpen(false)
+    setBranchFilter('')
+  }
+
+  const handleBranchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setSelectedIndex((prev) => Math.min(prev + 1, Math.max(filteredBranches.length - 1, 0)))
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setSelectedIndex((prev) => Math.max(prev - 1, 0))
+      return
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      const candidate = filteredBranches[selectedIndex]
+      if (candidate) selectBranch(candidate)
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      setBranchMenuOpen(false)
+    }
+  }
+
+  const message = stateMessage(context, error)
+  const isGitReady = context?.state === 'ok'
+  const isLaunchReady = !workDir || (
+    !loading &&
+    (!!context || !!error) &&
+    (
+      context?.state !== 'ok' ||
+      context.branches.length === 0 ||
+      !!selectedBranch
+    )
+  )
+
+  useEffect(() => {
+    onLaunchReadyChange?.(isLaunchReady)
+  }, [isLaunchReady, onLaunchReadyChange])
+
+  return (
+    <div ref={rootRef} className="flex min-w-0 flex-col gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <DirectoryPicker value={workDir} onChange={onWorkDirChange} />
+
+        {loading && workDir && (
+          <div className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)]">
+            <Loader2 size={14} className="shrink-0 animate-spin" />
+            <span>{t('common.loading')}</span>
+          </div>
+        )}
+
+        {isGitReady && (
+          <>
+            <button
+              ref={branchButtonRef}
+              type="button"
+              disabled={disabled || loading || context.branches.length === 0}
+              aria-haspopup="listbox"
+              aria-expanded={branchMenuOpen}
+              aria-label={t('repoLaunch.selectBranch')}
+              onClick={() => {
+                setBranchMenuOpen((prev) => !prev)
+                setBranchFilter('')
+              }}
+              className="inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <GitBranch size={15} className="shrink-0" />
+              <span className="truncate font-medium text-[var(--color-text-primary)]">
+                {selectedBranch?.name || t('repoLaunch.noBranch')}
+              </span>
+              <ChevronDown size={14} className="shrink-0 text-[var(--color-text-tertiary)]" />
+            </button>
+
+            <button
+              type="button"
+              disabled={disabled}
+              aria-pressed={useWorktree}
+              aria-label={t('repoLaunch.toggleWorktree')}
+              onClick={() => onUseWorktreeChange(!useWorktree)}
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35 disabled:cursor-not-allowed disabled:opacity-50 ${
+                useWorktree
+                  ? 'border-[var(--color-brand)]/40 bg-[var(--color-primary-fixed)] text-[var(--color-text-primary)]'
+                  : 'border-[var(--color-border)] bg-[var(--color-surface-container-low)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+              }`}
+            >
+              <GitFork size={15} className="shrink-0" />
+              <span className="font-medium">
+                {useWorktree ? t('repoLaunch.worktreeIsolated') : t('repoLaunch.worktreeCurrent')}
+              </span>
+            </button>
+          </>
+        )}
+      </div>
+
+      {message && workDir && (
+        <div className="flex items-center gap-2 px-1 text-[11px] text-[var(--color-text-tertiary)]">
+          <AlertCircle size={13} className="shrink-0" />
+          <span>
+            {message === 'not_git'
+              ? t('repoLaunch.notGit')
+              : message === 'missing'
+                ? t('repoLaunch.missingWorkdir')
+                : message}
+          </span>
+        </div>
+      )}
+
+      {warningMessage && (
+        <div className="flex items-center gap-2 px-1 text-[11px] text-[var(--color-warning)]">
+          <AlertCircle size={13} className="shrink-0" />
+          <span>{warningMessage}</span>
+        </div>
+      )}
+
+      {branchMenuOpen && menuPos && createPortal(
+        <div
+          ref={menuRef}
+          className="w-[390px] overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
+          style={{
+            position: 'fixed',
+            left: menuPos.left,
+            ...(menuPos.direction === 'down'
+              ? { top: menuPos.top }
+              : { bottom: window.innerHeight - menuPos.top }),
+            zIndex: 9999,
+          }}
+        >
+          <div className="border-b border-[var(--color-border)] p-3">
+            <label htmlFor={searchInputId} className="mb-2 block text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)]">
+              {t('repoLaunch.selectBranch')}
+            </label>
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2">
+              <Search size={15} className="shrink-0 text-[var(--color-text-tertiary)]" />
+              <input
+                id={searchInputId}
+                ref={searchRef}
+                value={branchFilter}
+                onChange={(event) => setBranchFilter(event.target.value)}
+                onKeyDown={handleBranchKeyDown}
+                aria-controls={listboxId}
+                aria-activedescendant={filteredBranches[selectedIndex] ? `${listboxId}-option-${selectedIndex}` : undefined}
+                placeholder={t('repoLaunch.searchBranch')}
+                className="min-w-0 flex-1 bg-transparent text-sm text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+              />
+            </div>
+          </div>
+
+          <div id={listboxId} role="listbox" aria-label={t('repoLaunch.selectBranch')} className="max-h-[280px] overflow-y-auto py-1">
+            {filteredBranches.length === 0 ? (
+              <div className="px-4 py-8 text-center text-xs text-[var(--color-text-tertiary)]">
+                {t('repoLaunch.noBranchMatch')}
+              </div>
+            ) : filteredBranches.map((candidate, index) => {
+              const isSelected = candidate.name === selectedBranch?.name
+              return (
+                <button
+                  key={candidate.name}
+                  id={`${listboxId}-option-${index}`}
+                  ref={(el) => { itemRefs.current[index] = el }}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                  onClick={() => selectBranch(candidate)}
+                  className={`flex w-full items-center gap-3 px-4 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)]/35 ${
+                    index === selectedIndex || isSelected ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]'
+                  }`}
+                >
+                  <span className={`h-8 w-1 rounded-full ${isSelected ? 'bg-[var(--color-brand)]' : 'bg-transparent'}`} />
+                  <GitBranch size={17} className="shrink-0 text-[var(--color-text-secondary)]" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold text-[var(--color-text-primary)]">
+                      {candidate.name}
+                    </span>
+                    <span className="block truncate text-[11px] text-[var(--color-text-tertiary)]">
+                      {candidate.current
+                        ? t('repoLaunch.currentBranch')
+                        : candidate.checkedOut
+                          ? t('repoLaunch.checkedOut')
+                          : candidate.remote && !candidate.local
+                            ? candidate.remoteRef || t('repoLaunch.remoteBranch')
+                            : t('repoLaunch.localBranch')}
+                    </span>
+                  </span>
+                  {isSelected && <Check size={17} className="shrink-0 text-[var(--color-brand)]" />}
+                </button>
+              )
+            })}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  )
+}

@@ -23,6 +23,10 @@ Environment:
   SKIP_INSTALL=1   Skip `bun install` in the repo root and desktop app.
   SIGN_BUILD=1     Remove the default `--no-sign` flag and allow signed builds.
   OPEN_OUTPUT=1    Open the canonical artifact output directory in Finder after a successful build.
+  PRESERVE_TAURI_TARGET=1
+                  Keep Tauri/Rust target cache for a faster incremental build.
+                  By default this script removes the macOS target cache so
+                  packaged WebView assets cannot be silently reused.
 
 Examples:
   ./desktop/scripts/build-macos-arm64.sh
@@ -62,27 +66,47 @@ if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then
 fi
 
 # ── 清理 + 显式预热前端 / sidecar ────────────────────────────
-# 之前遇到过"改了 src/ 代码,build 的 .app 里 sidecar 还是旧的"的诡异
-# case —— 根因是 Bun.build / Tauri bundler 某一层的缓存把旧 sidecar
-# binary 复用进了新 .app(.app 被删干净了也救不回来,因为 binary 源在
-# desktop/src-tauri/binaries/)。
+# 之前遇到过两类"改了源码,build 出来的 .app 还是旧行为"的诡异 case:
+#   1) Bun.build / Tauri bundler 某一层缓存把旧 sidecar binary 复用进新 .app
+#   2) Tauri/Rust target 缓存复用旧 claude-code-desktop,导致新 dist 没被嵌进去
+# 第二类尤其隐蔽: dist 是新的,sidecar 也是新的,但 WebView 运行的还是旧前端。
 #
-# 这里做三件事强制 fresh build:
-#   1) 硬删 sidecar 源 binary + Tauri bundle 目录 + 前端 dist
+# 默认做四件事强制 fresh build:
+#   1) 硬删 sidecar 源 binary + Tauri target/bundle 目录 + 前端 dist
 #   2) 显式跑 bun run build + bun run build:sidecars
 #   3) tauri build 用 --config 覆盖 beforeBuildCommand 为 true(no-op),
 #      避免 sidecar 被重复编译浪费 ~10s
+#   4) 复制到 canonical output 前再次清空输出目录
 # 任一步失败,整个脚本立即退出(set -e)。
-echo "[build-macos-arm64] Cleaning stale sidecar binaries and bundle output..."
+echo "[build-macos-arm64] Cleaning stale sidecar binaries, frontend output, and Tauri bundle cache..."
 rm -rf "${DESKTOP_DIR}/src-tauri/binaries/claude-sidecar-"*
-rm -rf "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/bundle"
-rm -rf "${DESKTOP_DIR}/src-tauri/target/release/bundle"
 rm -rf "${DESKTOP_DIR}/dist"
 rm -f "${DESKTOP_DIR}/tsconfig.tsbuildinfo"
-rm -rf "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/build/claude-code-desktop-"*
-rm -rf "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/.fingerprint/claude-code-desktop-"*
-rm -f "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/deps/claude_code_desktop-"*
-rm -f "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/deps/libclaude_code_desktop-"*
+
+if [[ "${PRESERVE_TAURI_TARGET:-0}" == "1" ]]; then
+  echo "[build-macos-arm64] PRESERVE_TAURI_TARGET=1: keeping Rust dependency cache, clearing app-specific artifacts only..."
+  rm -rf "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/bundle"
+  rm -rf "${DESKTOP_DIR}/src-tauri/target/release/bundle"
+  rm -f "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/claude-code-desktop"
+  rm -f "${DESKTOP_DIR}/src-tauri/target/release/claude-code-desktop"
+  find "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/build" \
+    -maxdepth 1 -name 'claude-code-desktop-*' -exec rm -rf {} + 2>/dev/null || true
+  find "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/.fingerprint" \
+    -maxdepth 1 -name 'claude-code-desktop-*' -exec rm -rf {} + 2>/dev/null || true
+  find "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}/release/deps" \
+    -maxdepth 1 \( -name 'claude_code_desktop-*' -o -name 'libclaude_code_desktop-*' \) -exec rm -f {} + 2>/dev/null || true
+else
+  echo "[build-macos-arm64] Removing Tauri target cache for ${TARGET_TRIPLE} to force fresh embedded frontend assets..."
+  rm -rf "${DESKTOP_DIR}/src-tauri/target/${TARGET_TRIPLE}"
+  rm -rf "${DESKTOP_DIR}/src-tauri/target/release/bundle"
+  rm -f "${DESKTOP_DIR}/src-tauri/target/release/claude-code-desktop"
+  find "${DESKTOP_DIR}/src-tauri/target/release/build" \
+    -maxdepth 1 -name 'claude-code-desktop-*' -exec rm -rf {} + 2>/dev/null || true
+  find "${DESKTOP_DIR}/src-tauri/target/release/.fingerprint" \
+    -maxdepth 1 -name 'claude-code-desktop-*' -exec rm -rf {} + 2>/dev/null || true
+  find "${DESKTOP_DIR}/src-tauri/target/release/deps" \
+    -maxdepth 1 \( -name 'claude_code_desktop-*' -o -name 'libclaude_code_desktop-*' \) -exec rm -f {} + 2>/dev/null || true
+fi
 
 echo "[build-macos-arm64] Rebuilding frontend (tsc + vite)..."
 (cd "${DESKTOP_DIR}" && bun run build)

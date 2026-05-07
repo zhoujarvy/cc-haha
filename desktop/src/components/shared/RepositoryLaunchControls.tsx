@@ -30,6 +30,8 @@ type Props = {
 
 const BRANCH_MENU_HEIGHT = 360
 const BRANCH_MENU_WIDTH = 390
+const WORKTREE_MENU_HEIGHT = 126
+const WORKTREE_MENU_WIDTH = 226
 const VIEWPORT_GUTTER = 12
 
 function stateMessage(context: RepositoryContextResult | null, error: string | null) {
@@ -59,13 +61,18 @@ export function RepositoryLaunchControls({
   const [branchFilter, setBranchFilter] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number; direction: 'up' | 'down' } | null>(null)
+  const [worktreeMenuOpen, setWorktreeMenuOpen] = useState(false)
+  const [worktreeMenuPos, setWorktreeMenuPos] = useState<{ top: number; left: number; direction: 'up' | 'down' } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const branchButtonRef = useRef<HTMLButtonElement>(null)
+  const worktreeButtonRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const worktreeMenuRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
   const searchInputId = useId()
   const listboxId = useId()
+  const worktreeListboxId = useId()
 
   const updateMenuPos = useCallback(() => {
     if (!branchButtonRef.current) return
@@ -75,6 +82,20 @@ export function RepositoryLaunchControls({
     const direction = spaceBelow >= BRANCH_MENU_HEIGHT || spaceBelow >= spaceAbove ? 'down' : 'up'
     const maxLeft = Math.max(VIEWPORT_GUTTER, window.innerWidth - BRANCH_MENU_WIDTH - VIEWPORT_GUTTER)
     setMenuPos({
+      top: direction === 'down' ? rect.bottom + 6 : rect.top - 6,
+      left: Math.min(Math.max(rect.left, VIEWPORT_GUTTER), maxLeft),
+      direction,
+    })
+  }, [])
+
+  const updateWorktreeMenuPos = useCallback(() => {
+    if (!worktreeButtonRef.current) return
+    const rect = worktreeButtonRef.current.getBoundingClientRect()
+    const spaceAbove = rect.top
+    const spaceBelow = window.innerHeight - rect.bottom
+    const direction = spaceBelow >= WORKTREE_MENU_HEIGHT || spaceBelow >= spaceAbove ? 'down' : 'up'
+    const maxLeft = Math.max(VIEWPORT_GUTTER, window.innerWidth - WORKTREE_MENU_WIDTH - VIEWPORT_GUTTER)
+    setWorktreeMenuPos({
       top: direction === 'down' ? rect.bottom + 6 : rect.top - 6,
       left: Math.min(Math.max(rect.left, VIEWPORT_GUTTER), maxLeft),
       direction,
@@ -131,17 +152,20 @@ export function RepositoryLaunchControls({
   }, [branch, context, onBranchChange])
 
   useEffect(() => {
-    if (!branchMenuOpen) return
+    if (!branchMenuOpen && !worktreeMenuOpen) return
     const handleClick = (event: MouseEvent) => {
       const target = event.target as Node
       if (rootRef.current?.contains(target)) return
       if (menuRef.current?.contains(target)) return
+      if (worktreeMenuRef.current?.contains(target)) return
       setBranchMenuOpen(false)
+      setWorktreeMenuOpen(false)
     }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
       setBranchMenuOpen(false)
+      setWorktreeMenuOpen(false)
     }
     document.addEventListener('mousedown', handleClick)
     document.addEventListener('keydown', handleKeyDown)
@@ -149,7 +173,7 @@ export function RepositoryLaunchControls({
       document.removeEventListener('mousedown', handleClick)
       document.removeEventListener('keydown', handleKeyDown)
     }
-  }, [branchMenuOpen])
+  }, [branchMenuOpen, worktreeMenuOpen])
 
   useEffect(() => {
     if (!branchMenuOpen) return
@@ -162,6 +186,17 @@ export function RepositoryLaunchControls({
       window.removeEventListener('resize', updateMenuPos)
     }
   }, [branchMenuOpen, updateMenuPos])
+
+  useEffect(() => {
+    if (!worktreeMenuOpen) return
+    updateWorktreeMenuPos()
+    window.addEventListener('scroll', updateWorktreeMenuPos, true)
+    window.addEventListener('resize', updateWorktreeMenuPos)
+    return () => {
+      window.removeEventListener('scroll', updateWorktreeMenuPos, true)
+      window.removeEventListener('resize', updateWorktreeMenuPos)
+    }
+  }, [worktreeMenuOpen, updateWorktreeMenuPos])
 
   useEffect(() => {
     setSelectedIndex(0)
@@ -215,6 +250,12 @@ export function RepositoryLaunchControls({
     onBranchChange(candidate.name)
     setBranchMenuOpen(false)
     setBranchFilter('')
+  }
+
+  const selectWorktreeMode = (enabled: boolean) => {
+    if (!enabled && requiresIsolation) return
+    onUseWorktreeChange(enabled)
+    setWorktreeMenuOpen(false)
   }
 
   const handleBranchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -284,6 +325,7 @@ export function RepositoryLaunchControls({
               title={selectedBranch?.name || t('repoLaunch.noBranch')}
               onClick={() => {
                 setBranchMenuOpen((prev) => !prev)
+                setWorktreeMenuOpen(false)
                 setBranchFilter('')
               }}
               className={`${workbarButtonClassName} max-w-[260px]`}
@@ -296,12 +338,18 @@ export function RepositoryLaunchControls({
             </button>
 
             <button
+              ref={worktreeButtonRef}
               type="button"
-              disabled={disabled || requiresIsolation}
-              aria-pressed={useWorktree}
-              aria-label={t('repoLaunch.toggleWorktree')}
+              disabled={disabled}
+              aria-haspopup="listbox"
+              aria-expanded={worktreeMenuOpen}
+              aria-controls={worktreeMenuOpen ? worktreeListboxId : undefined}
+              aria-label={`${t('repoLaunch.selectWorktree')}: ${worktreeLabel}`}
               title={worktreeLabel}
-              onClick={() => onUseWorktreeChange(!useWorktree)}
+              onClick={() => {
+                setWorktreeMenuOpen((prev) => !prev)
+                setBranchMenuOpen(false)
+              }}
               className={`${workbarButtonClassName} ${
                 useWorktree
                   ? 'bg-[var(--color-surface-container-lowest)] text-[var(--color-text-primary)]'
@@ -312,6 +360,7 @@ export function RepositoryLaunchControls({
               <span className="min-w-0 truncate">
                 {worktreeLabel}
               </span>
+              <ChevronDown size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />
             </button>
           </>
         )}
@@ -411,6 +460,62 @@ export function RepositoryLaunchControls({
                 </button>
               )
             })}
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {worktreeMenuOpen && worktreeMenuPos && createPortal(
+        <div
+          ref={worktreeMenuRef}
+          className="w-[226px] overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)]"
+          style={{
+            position: 'fixed',
+            left: worktreeMenuPos.left,
+            ...(worktreeMenuPos.direction === 'down'
+              ? { top: worktreeMenuPos.top }
+              : { bottom: window.innerHeight - worktreeMenuPos.top }),
+            zIndex: 9999,
+          }}
+        >
+          <div id={worktreeListboxId} role="listbox" aria-label={t('repoLaunch.selectWorktree')}>
+            <button
+              type="button"
+              role="option"
+              aria-selected={!useWorktree}
+              aria-disabled={requiresIsolation}
+              disabled={requiresIsolation}
+              onClick={() => selectWorktreeMode(false)}
+              className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)]/35 disabled:cursor-not-allowed disabled:opacity-45 ${
+                !useWorktree ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]'
+              }`}
+            >
+              <GitFork size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-medium text-[var(--color-text-primary)]">
+                  {t('repoLaunch.worktreeCurrent')}
+                </span>
+              </span>
+              {!useWorktree && <Check size={16} className="shrink-0 text-[var(--color-brand)]" />}
+            </button>
+
+            <button
+              type="button"
+              role="option"
+              aria-selected={useWorktree}
+              onClick={() => selectWorktreeMode(true)}
+              className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)]/35 ${
+                useWorktree ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]'
+              }`}
+            >
+              <GitFork size={16} className="shrink-0 text-[var(--color-text-tertiary)]" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-medium text-[var(--color-text-primary)]">
+                  {t('repoLaunch.worktreeIsolated')}
+                </span>
+              </span>
+              {useWorktree && <Check size={16} className="shrink-0 text-[var(--color-brand)]" />}
+            </button>
           </div>
         </div>,
         document.body,

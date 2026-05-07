@@ -344,6 +344,9 @@ describe('EmptySession', () => {
       expect(screen.getByText('Isolated worktree')).toBeInTheDocument()
     })
 
+    fireEvent.click(screen.getByRole('button', { name: /Select worktree mode: Isolated worktree/ }))
+    expect(await screen.findByRole('option', { name: 'Current worktree' })).toBeDisabled()
+
     fireEvent.click(screen.getByRole('button', { name: /Run/i }))
 
     await waitFor(() => {

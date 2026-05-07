@@ -354,7 +354,8 @@ describe('ChatInput file mentions', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: /Select branch: main/ }))
     fireEvent.click(await screen.findByRole('option', { name: /feature\/a/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'Toggle worktree isolation' }))
+    fireEvent.click(screen.getByRole('button', { name: /Select worktree mode: Current worktree/ }))
+    fireEvent.click(await screen.findByRole('option', { name: 'Isolated worktree' }))
     expect(screen.getByText('Isolated worktree')).toBeInTheDocument()
     const input = screen.getByRole('textbox') as HTMLTextAreaElement
     fireEvent.change(input, { target: { value: 'run in a worktree', selectionStart: 17 } })

@@ -12,6 +12,9 @@ const coreApiMock = vi.hoisted(() => ({
 const eventApiMock = vi.hoisted(() => ({
   listen: vi.fn(),
 }))
+const shellApiMock = vi.hoisted(() => ({
+  open: vi.fn(),
+}))
 const requestUserAttentionMock = vi.hoisted(() => vi.fn())
 const windowApiMock = vi.hoisted(() => ({
   requestUserAttention: requestUserAttentionMock,
@@ -28,11 +31,13 @@ vi.mock('@tauri-apps/plugin-notification', () => notificationPluginMock)
 vi.mock('@tauri-apps/api/core', () => coreApiMock)
 vi.mock('@tauri-apps/api/event', () => eventApiMock)
 vi.mock('@tauri-apps/api/window', () => windowApiMock)
+vi.mock('@tauri-apps/plugin-shell', () => shellApiMock)
 
 import {
   getDesktopNotificationPermission,
   installDesktopNotificationClickListener,
   notifyDesktop,
+  openDesktopNotificationSettings,
   requestDesktopNotificationPermission,
   resetDesktopNotificationsForTests,
   setNativeNotificationSenderForTests,
@@ -45,6 +50,7 @@ describe('desktopNotifications', () => {
     resetDesktopNotificationsForTests()
     coreApiMock.invoke.mockReset()
     eventApiMock.listen.mockReset()
+    shellApiMock.open.mockReset()
     notificationPluginMock.isPermissionGranted.mockReset()
     notificationPluginMock.requestPermission.mockReset()
     notificationPluginMock.sendNotification.mockReset()
@@ -229,6 +235,57 @@ describe('desktopNotifications', () => {
     await expect(getDesktopNotificationPermission()).resolves.toBe('default')
     await expect(requestDesktopNotificationPermission()).resolves.toBe('granted')
     expect(notificationPluginMock.requestPermission).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads and requests Windows notification permission through the native plugin command', async () => {
+    Object.defineProperty(navigator, 'platform', {
+      configurable: true,
+      value: 'Win32',
+    })
+    coreApiMock.invoke
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce('granted')
+
+    await expect(getDesktopNotificationPermission()).resolves.toBe('granted')
+    await expect(requestDesktopNotificationPermission()).resolves.toBe('granted')
+
+    expect(coreApiMock.invoke).toHaveBeenNthCalledWith(1, 'plugin:notification|is_permission_granted')
+    expect(coreApiMock.invoke).toHaveBeenNthCalledWith(2, 'plugin:notification|request_permission')
+    expect(notificationPluginMock.isPermissionGranted).not.toHaveBeenCalled()
+    expect(notificationPluginMock.requestPermission).not.toHaveBeenCalled()
+  })
+
+  it('sends Windows notifications when the native plugin reports permission granted', async () => {
+    Object.defineProperty(navigator, 'platform', {
+      configurable: true,
+      value: 'Win32',
+    })
+    coreApiMock.invoke.mockResolvedValueOnce(true)
+
+    await expect(notifyDesktop({
+      title: 'Permission required',
+      body: 'Approve command execution',
+    })).resolves.toBe(true)
+
+    expect(coreApiMock.invoke).toHaveBeenCalledWith('plugin:notification|is_permission_granted')
+    expect(notificationPluginMock.isPermissionGranted).not.toHaveBeenCalled()
+    expect(notificationPluginMock.sendNotification).toHaveBeenCalledWith({
+      title: 'Permission required',
+      body: 'Approve command execution',
+    })
+  })
+
+  it('opens Windows notification settings through the native command', async () => {
+    Object.defineProperty(navigator, 'platform', {
+      configurable: true,
+      value: 'Win32',
+    })
+    coreApiMock.invoke.mockResolvedValueOnce(true)
+
+    await expect(openDesktopNotificationSettings()).resolves.toBe(true)
+
+    expect(coreApiMock.invoke).toHaveBeenCalledWith('open_windows_notification_settings')
+    expect(shellApiMock.open).not.toHaveBeenCalled()
   })
 
   it('reports and requests macOS notification permission through the native bridge', async () => {

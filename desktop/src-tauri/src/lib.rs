@@ -830,6 +830,26 @@ async fn macos_send_notification(
         .await
 }
 
+#[tauri::command]
+fn open_windows_notification_settings() -> Result<bool, String> {
+    open_windows_notification_settings_impl()
+}
+
+#[cfg(target_os = "windows")]
+fn open_windows_notification_settings_impl() -> Result<bool, String> {
+    StdCommand::new("explorer.exe")
+        .arg("ms-settings:notifications")
+        .spawn()
+        .map_err(|err| format!("open Windows notification settings: {err}"))?;
+
+    Ok(true)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_windows_notification_settings_impl() -> Result<bool, String> {
+    Ok(false)
+}
+
 async fn run_notification_bridge<T, F>(operation: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -1533,7 +1553,8 @@ pub fn run() {
             terminal_kill,
             macos_notification_permission_state,
             macos_request_notification_permission,
-            macos_send_notification
+            macos_send_notification,
+            open_windows_notification_settings
         ]);
 
     // macOS: native menu bar (traffic-light overlay style)

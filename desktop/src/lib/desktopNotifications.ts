@@ -26,6 +26,7 @@ type NativeNotificationPayload = {
 
 type NativeNotificationSender = (options: NativeNotificationPayload) => Promise<boolean> | boolean
 export type DesktopNotificationPermission = NotificationPermission | 'unsupported'
+type PluginPermissionState = DesktopNotificationPermission | 'prompt' | 'prompt-with-rationale'
 
 const TARGET_EXTRA_KEY = 'ccHahaTarget'
 const notifiedKeys = new Set<string>()
@@ -46,10 +47,12 @@ function readBrowserNotificationPermission(): DesktopNotificationPermission {
 function detectPlatform(): 'darwin' | 'win32' | 'linux' | 'unknown' {
   const platform = typeof navigator !== 'undefined' ? navigator.platform.toLowerCase() : ''
   const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent.toLowerCase() : ''
-  const raw = `${platform} ${userAgent}`
-  if (raw.includes('mac')) return 'darwin'
-  if (raw.includes('win')) return 'win32'
-  if (raw.includes('linux')) return 'linux'
+  if (platform.includes('mac')) return 'darwin'
+  if (platform.includes('win')) return 'win32'
+  if (platform.includes('linux')) return 'linux'
+  if (userAgent.includes('mac')) return 'darwin'
+  if (userAgent.includes('win')) return 'win32'
+  if (userAgent.includes('linux')) return 'linux'
   return 'unknown'
 }
 
@@ -61,6 +64,46 @@ function getNotificationSettingsUrl(): string | null {
       return 'ms-settings:notifications'
     default:
       return null
+  }
+}
+
+function normalizePermission(value: unknown): DesktopNotificationPermission {
+  if (value === true) return 'granted'
+  if (value === false) return 'denied'
+  if (value === null) return 'default'
+  if (value === 'prompt' || value === 'prompt-with-rationale') return 'default'
+  return ['default', 'denied', 'granted', 'unsupported'].includes(value as string)
+    ? value as DesktopNotificationPermission
+    : 'unsupported'
+}
+
+async function invokeWindowsNotificationPermissionState(): Promise<DesktopNotificationPermission | null> {
+  if (detectPlatform() !== 'win32') return null
+
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const granted = await invoke<boolean | null>('plugin:notification|is_permission_granted')
+    return normalizePermission(granted)
+  } catch (err) {
+    if (typeof console !== 'undefined') {
+      console.warn('[desktopNotifications] failed to read Windows notification permission:', err)
+    }
+    return 'unsupported'
+  }
+}
+
+async function invokeWindowsNotificationPermissionRequest(): Promise<DesktopNotificationPermission | null> {
+  if (detectPlatform() !== 'win32') return null
+
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const permission = await invoke<PluginPermissionState>('plugin:notification|request_permission')
+    return normalizePermission(permission)
+  } catch (err) {
+    if (typeof console !== 'undefined') {
+      console.warn('[desktopNotifications] failed to request Windows notification permission:', err)
+    }
+    return 'unsupported'
   }
 }
 
@@ -187,6 +230,9 @@ export async function getDesktopNotificationPermission(): Promise<DesktopNotific
   const macPermission = await invokeMacNotificationPermissionState()
   if (macPermission) return macPermission
 
+  const windowsPermission = await invokeWindowsNotificationPermissionState()
+  if (windowsPermission) return windowsPermission
+
   try {
     const { isPermissionGranted } = await import('@tauri-apps/plugin-notification')
     if (await isPermissionGranted()) return 'granted'
@@ -199,6 +245,9 @@ export async function getDesktopNotificationPermission(): Promise<DesktopNotific
 export async function requestDesktopNotificationPermission(): Promise<DesktopNotificationPermission> {
   const macPermission = await invokeMacNotificationPermissionRequest()
   if (macPermission) return macPermission
+
+  const windowsPermission = await invokeWindowsNotificationPermissionRequest()
+  if (windowsPermission) return windowsPermission
 
   try {
     const {
@@ -216,6 +265,16 @@ export async function requestDesktopNotificationPermission(): Promise<DesktopNot
 export async function openDesktopNotificationSettings(): Promise<boolean> {
   const url = getNotificationSettingsUrl()
   if (!url) return false
+
+  if (detectPlatform() === 'win32') {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      const opened = await invoke<boolean>('open_windows_notification_settings')
+      if (opened) return true
+    } catch {
+      // Fall back to shell.open/window.open below.
+    }
+  }
 
   try {
     const { open } = await import('@tauri-apps/plugin-shell')
@@ -240,7 +299,9 @@ async function sendNativeNotification(options: { title: string; body?: string; t
     sendNotification,
   } = await import('@tauri-apps/plugin-notification')
 
-  if (!(await isPermissionGranted())) {
+  const windowsPermission = await invokeWindowsNotificationPermissionState()
+  const permissionGranted = windowsPermission ? windowsPermission === 'granted' : await isPermissionGranted()
+  if (!permissionGranted) {
     return false
   }
 
